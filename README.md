@@ -6,7 +6,7 @@
 <p align="center">
 
 ![](https://img.shields.io/badge/status-WIP-red?style=flat)
-[![Discord](https://img.shields.io/discord/1470772941296894128?color=5865F2&logo=discord&logoColor=white)](https://discord.gg/YrZPHAwMSG)
+[![Discord](https://img.shields.io/discord/1470772941296894128?color=5865F2&logo=discord&logoColor=white)](https://discord.com/invite/K2hmhfHRSt)
 
 </p>
 
@@ -16,7 +16,7 @@ An [IBM Db2](https://www.ibm.com/products/db2) plugin for [Tabularis](https://gi
 
 This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas and objects, run SQL queries, perform inline CRUD operations, and generate DDL through the Tabularis JSON-RPC plugin interface.
 
-**Discord** - [Join our discord server](https://discord.gg/YrZPHAwMSG) and chat with the maintainers.
+**Discord** - [Join our discord server](https://discord.com/invite/K2hmhfHRSt) and chat with the maintainers.
 
 ## Table of Contents
 
