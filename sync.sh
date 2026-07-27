@@ -21,9 +21,9 @@ esac
 
 echo "Target plugins directory: $PLUGINS_DIR"
 
-manifest="$plugin_src/manifest.json"
+manifest="$plugin_src/.tabularium"
 if [[ ! -f "$manifest" ]]; then
-  echo "manifest.json not found in $plugin_src" >&2
+  echo ".tabularium not found in $plugin_src" >&2
   exit 1
 fi
 
@@ -31,7 +31,7 @@ plugin_id=$(grep -o '"id"\s*:\s*"[^"]*"' "$manifest" | head -1 | sed 's/.*: *"\(
 executable=$(grep -o '"executable"\s*:\s*"[^"]*"' "$manifest" | head -1 | sed 's/.*: *"\(.*\)"/\1/')
 
 if [[ -z "$plugin_id" || -z "$executable" ]]; then
-  echo "Could not parse manifest.json" >&2
+  echo "Could not parse .tabularium" >&2
   exit 1
 fi
 
@@ -43,8 +43,8 @@ cargo build --release --manifest-path "$plugin_src/Cargo.toml"
 dest_dir="$PLUGINS_DIR/$plugin_id"
 mkdir -p "$dest_dir"
 
-cp "$manifest" "$dest_dir/manifest.json"
-echo "  Copied manifest.json"
+cp "$manifest" "$dest_dir/.tabularium"
+echo "  Copied .tabularium"
 
 bin_path="$plugin_src/target/release/$executable"
 if [[ ! -f "$bin_path" && -f "$plugin_src/target/release/$executable.exe" ]]; then
