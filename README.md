@@ -98,7 +98,7 @@ Once the plugin is packaged and published in a registry-compatible format, it ca
 cargo build --release
 ```
 
-2. Copy `tabularis-db2-plugin` (or `tabularis-db2-plugin.exe` on Windows) and `manifest.json` into the Tabularis plugins directory:
+2. Copy `tabularis-db2-plugin` (or `tabularis-db2-plugin.exe` on Windows) and `.tabularium` into the Tabularis plugins directory:
 
 | OS | Plugins Directory |
 |---|---|
