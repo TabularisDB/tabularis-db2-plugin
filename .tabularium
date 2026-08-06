@@ -11,7 +11,7 @@
   "default_username": "db2inst1",
   "executable": "tabularis-db2-plugin",
   "color": "#2563eb",
-  "icon": "database",
+  "icon": "assets/icon.png",
   "capabilities": {
     "schemas": true,
     "views": true,
