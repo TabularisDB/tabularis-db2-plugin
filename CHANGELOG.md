@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3] - 2026-08-06
+
+### Features
+
+- Add plugin icon and reference it in the manifest by @debba
 ## [0.0.2] - 2026-07-30
 
 ### Bug Fixes

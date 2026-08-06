@@ -1,6 +1,6 @@
 {
   "name": "db2",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "kind": "driver",
   "description": "IBM Db2 driver plugin for Tabularis",
   "engine": "db2",
