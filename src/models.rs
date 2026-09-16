@@ -31,6 +31,8 @@ pub struct ConnectionParams {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -42,6 +44,8 @@ pub struct TableColumn {
     pub is_auto_increment: bool,
     pub default_value: Option<String>,
     pub character_maximum_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -159,4 +163,71 @@ pub struct PluginSettings {
     pub security: Option<String>,
     pub current_schema: Option<String>,
     pub extra_properties: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TableColumn, TableInfo};
+    use serde_json::json;
+
+    const TABLE_COMMENT: &str = "Employee's résumé\n所有员工";
+    const COLUMN_COMMENT: &str = "Manager's notes — café\n第二行";
+
+    #[test]
+    fn table_info_round_trips_special_comments_and_omits_missing_comments() {
+        let table: TableInfo = serde_json::from_value(json!({
+            "name": "EMPLOYEES",
+            "comment": TABLE_COMMENT,
+        }))
+        .expect("deserialize table comment");
+
+        assert_eq!(table.comment.as_deref(), Some(TABLE_COMMENT));
+        assert_eq!(
+            serde_json::to_value(&table).expect("serialize table comment"),
+            json!({ "name": "EMPLOYEES", "comment": TABLE_COMMENT })
+        );
+
+        let plain: TableInfo = serde_json::from_value(json!({ "name": "DEPARTMENTS" }))
+            .expect("deserialize table without comment");
+        assert_eq!(plain.comment, None);
+        assert_eq!(
+            serde_json::to_value(&plain).expect("serialize table without comment"),
+            json!({ "name": "DEPARTMENTS" })
+        );
+    }
+
+    #[test]
+    fn table_column_round_trips_special_comments_and_omits_missing_comments() {
+        let column_json = json!({
+            "name": "NOTES",
+            "data_type": "CLOB",
+            "is_pk": false,
+            "is_nullable": true,
+            "is_auto_increment": false,
+            "default_value": null,
+            "character_maximum_length": 1048576,
+            "comment": COLUMN_COMMENT,
+        });
+        let column: TableColumn =
+            serde_json::from_value(column_json.clone()).expect("deserialize column comment");
+
+        assert_eq!(column.comment.as_deref(), Some(COLUMN_COMMENT));
+        assert_eq!(
+            serde_json::to_value(&column).expect("serialize column comment"),
+            column_json
+        );
+
+        let mut plain_json = column_json;
+        plain_json
+            .as_object_mut()
+            .expect("column object")
+            .remove("comment");
+        let plain: TableColumn =
+            serde_json::from_value(plain_json.clone()).expect("deserialize column without comment");
+        assert_eq!(plain.comment, None);
+        assert_eq!(
+            serde_json::to_value(&plain).expect("serialize column without comment"),
+            plain_json
+        );
+    }
 }
