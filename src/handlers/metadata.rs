@@ -55,7 +55,7 @@ pub fn get_tables(
     schema: &str,
 ) -> PluginResult<Vec<TableInfo>> {
     let sql = format!(
-        "SELECT TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA = '{}' AND TYPE = 'T' ORDER BY TABNAME WITH UR",
+        "SELECT TABNAME, REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = '{}' AND TYPE = 'T' ORDER BY TABNAME WITH UR",
         schema.replace('\'', "''")
     );
     let result = query_text_rows(params, settings, Some(schema), &sql)?;
@@ -65,6 +65,7 @@ pub fn get_tables(
         .filter_map(|row| {
             cell(&row, 0).map(|name| TableInfo {
                 name: name.to_string(),
+                comment: cell(&row, 1).map(ToString::to_string),
             })
         })
         .collect())
@@ -119,7 +120,7 @@ pub fn get_columns(
     table_name: &str,
 ) -> PluginResult<Vec<TableColumn>> {
     let sql = format!(
-        "SELECT COLNAME, TYPENAME, KEYSEQ, NULLS, IDENTITY, DEFAULT, LENGTH \
+        "SELECT COLNAME, TYPENAME, KEYSEQ, NULLS, IDENTITY, DEFAULT, LENGTH, REMARKS \
          FROM SYSCAT.COLUMNS WHERE TABSCHEMA = '{}' AND TABNAME = '{}' ORDER BY COLNO WITH UR",
         schema.replace('\'', "''"),
         table_name.replace('\'', "''")
@@ -139,6 +140,7 @@ pub fn get_columns(
             is_auto_increment: matches!(cell(&row, 4), Some("Y")),
             default_value: cell(&row, 5).map(ToString::to_string),
             character_maximum_length: cell(&row, 6).and_then(|value| value.parse::<u64>().ok()),
+            comment: cell(&row, 7).map(ToString::to_string),
         })
         .collect())
 }
@@ -282,7 +284,7 @@ pub fn get_all_columns_batch(
     schema: &str,
 ) -> PluginResult<HashMap<String, Vec<TableColumn>>> {
     let sql = format!(
-        "SELECT TABNAME, COLNAME, TYPENAME, KEYSEQ, NULLS, IDENTITY, DEFAULT, LENGTH \
+        "SELECT TABNAME, COLNAME, TYPENAME, KEYSEQ, NULLS, IDENTITY, DEFAULT, LENGTH, REMARKS \
          FROM SYSCAT.COLUMNS WHERE TABSCHEMA = '{}' ORDER BY TABNAME, COLNO WITH UR",
         schema.replace('\'', "''")
     );
@@ -303,6 +305,7 @@ pub fn get_all_columns_batch(
                 is_auto_increment: bool_from_catalog_flag(cell(&row, 5)),
                 default_value: cell(&row, 6).map(ToString::to_string),
                 character_maximum_length: cell(&row, 7).and_then(|value| value.parse::<u64>().ok()),
+                comment: cell(&row, 8).map(ToString::to_string),
             });
     }
     Ok(map)

@@ -97,6 +97,7 @@ else
     # Copy fixtures into container
     docker cp "$PROJECT_DIR/tests/fixtures/setup.sql" "$CONTAINER_NAME":/tmp/setup.sql
     docker cp "$PROJECT_DIR/tests/fixtures/routines.sql" "$CONTAINER_NAME":/tmp/routines.sql
+    docker cp "$PROJECT_DIR/tests/fixtures/comments.sql" "$CONTAINER_NAME":/tmp/comments.sql
     docker cp "$PROJECT_DIR/tests/fixtures/explain_setup.sql" "$CONTAINER_NAME":/tmp/explain_setup.sql
 
     # Run table/data setup (semicolon-terminated)
@@ -108,6 +109,11 @@ else
     echo "  Creating stored procedures and functions..."
     docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
         "db2 connect to $DB_NAME && db2 -td@ -vf /tmp/routines.sql"
+
+    # Add table and column comments (including multiline Unicode fixtures)
+    echo "  Adding metadata comments..."
+    docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
+        "db2 connect to $DB_NAME && db2 -td@ -vf /tmp/comments.sql"
 
     # Create explain tables for EXPLAIN PLAN support
     echo "  Creating explain tables..."

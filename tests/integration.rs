@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
+const TABLE_COMMENT: &str = "Employee's résumé\n所有员工";
+const COLUMN_COMMENT: &str = "Manager's notes — café\n第二行";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -207,6 +210,21 @@ fn test_get_tables() {
             "table {expected} not found in: {names:?}"
         );
     }
+
+    let employees = tables
+        .iter()
+        .find(|table| table["name"] == "EMPLOYEES")
+        .expect("EMPLOYEES table missing");
+    assert_eq!(employees["comment"], json!(TABLE_COMMENT));
+
+    let departments = tables
+        .iter()
+        .find(|table| table["name"] == "DEPARTMENTS")
+        .expect("DEPARTMENTS table missing");
+    assert!(
+        departments.get("comment").is_none(),
+        "tables without remarks should omit comment"
+    );
 }
 
 #[test]
@@ -254,6 +272,21 @@ fn test_get_columns() {
         json!(true),
         "DEPT_ID should be nullable"
     );
+
+    let notes = columns
+        .iter()
+        .find(|column| column["name"] == "NOTES")
+        .expect("NOTES column missing");
+    assert_eq!(notes["comment"], json!(COLUMN_COMMENT));
+
+    let first_name = columns
+        .iter()
+        .find(|column| column["name"] == "FIRST_NAME")
+        .expect("FIRST_NAME column missing");
+    assert!(
+        first_name.get("comment").is_none(),
+        "columns without remarks should omit comment"
+    );
 }
 
 #[test]
@@ -277,6 +310,21 @@ fn test_get_all_columns_batch() {
     assert!(
         emp_cols.len() >= 6,
         "EMPLOYEES should have at least 6 columns"
+    );
+
+    let notes = emp_cols
+        .iter()
+        .find(|column| column["name"] == "NOTES")
+        .expect("NOTES column missing from batch");
+    assert_eq!(notes["comment"], json!(COLUMN_COMMENT));
+
+    let first_name = emp_cols
+        .iter()
+        .find(|column| column["name"] == "FIRST_NAME")
+        .expect("FIRST_NAME column missing from batch");
+    assert!(
+        first_name.get("comment").is_none(),
+        "batch columns without remarks should omit comment"
     );
 }
 
@@ -523,6 +571,11 @@ fn test_get_schema_snapshot() {
         .unwrap();
     let cols = emp["columns"].as_array().expect("expected columns array");
     assert!(!cols.is_empty(), "snapshot should include column data");
+    let notes = cols
+        .iter()
+        .find(|column| column["name"] == "NOTES")
+        .expect("snapshot should include NOTES");
+    assert_eq!(notes["comment"], json!(COLUMN_COMMENT));
 
     // Check that snapshot includes foreign keys
     let fks = emp["foreign_keys"]
