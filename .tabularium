@@ -1,9 +1,29 @@
 {
+  "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
   "id": "db2",
   "name": "Db2",
   "version": "0.0.3",
-  "kind": "driver",
   "description": "IBM Db2 driver plugin for Tabularis",
+  "category": "database",
+  "tags": [
+    "driver",
+    "db2",
+    "ibm",
+    "sql",
+    "relational",
+    "database-driver"
+  ],
+  "license": "Apache-2.0",
+  "icon": "assets/icon.png",
+  "color": "#2563eb",
+  "readme": "README.md",
+  "homepage": "https://github.com/TabularisDB/tabularis-db2-plugin",
+  "documentation_url": "https://github.com/TabularisDB/tabularis-db2-plugin#readme",
+  "min_runtime_version": "0.25.0",
+  "support": {
+    "issues_url": "https://github.com/TabularisDB/tabularis-db2-plugin/issues"
+  },
+  "kind": "driver",
   "engine": "db2",
   "paradigms": [
     "sql"
@@ -11,8 +31,6 @@
   "default_port": 50000,
   "default_username": "db2inst1",
   "executable": "tabularis-db2-plugin",
-  "color": "#2563eb",
-  "icon": "assets/icon.png",
   "capabilities": {
     "schemas": true,
     "views": true,
@@ -38,14 +56,14 @@
       "label": "ODBC Driver Name",
       "type": "string",
       "default": "IBM DB2 ODBC DRIVER",
-      "description": "ODBC driver name used in the DB2 connection string."
+      "description": "ODBC driver name used in the Db2 connection string."
     },
     {
       "key": "security",
       "label": "Security Mode",
       "type": "select",
       "default": "none",
-      "description": "Optional DB2 security mode.",
+      "description": "Optional Db2 security mode.",
       "options": [
         "none",
         "ssl"

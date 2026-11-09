@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+    # Default types are opened/synchronize/reopened, which miss title-only
+    # edits — needed so pr-title re-checks a title edit. labeled/unlabeled are
+    # handled by version-suggestion.yml, which has its own trigger types.
+    types: [opened, edited, reopened, synchronize]
+  schedule:
+    # Weekly cargo-audit sweep to catch newly-disclosed CVEs in deps that
+    # haven't otherwise changed. Off-peak minute, not :00/:30.
+    - cron: "23 6 * * 1"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The plugin links against the ODBC driver manager at build time; no
+      # Db2 driver or server is needed for the unit tests.
+      - name: Install ODBC build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc-dev
+
+      - name: Build
+        run: cargo build
+
+      - name: Run tests
+        # --bins excludes tests/integration.rs: that's a live-database
+        # integration test requiring a running Db2 instance, covered by the
+        # dedicated live-db-integration job below.
+        run: cargo test --bins
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  validate-manifest:
+    name: Validate .tabularium manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate against the live registry schema
+        run: npx --yes @tabularium/cli validate .tabularium --registry https://registry.tabularis.dev --kind driver
+
+      # The registry accepts unknown capability keys and strips them on
+      # ingestion, so the CLI above cannot catch a capability the registry
+      # does not know. Compare the declared keys with the schema's own list.
+      - name: Check declared capabilities exist in the registry schema
+        run: ./scripts/check-capabilities.sh
+
+      # The release workflow rejects a tag that disagrees with .tabularium;
+      # catching a Cargo.toml drift here keeps `--version`-style diagnostics
+      # and the manifest telling the same story.
+      - name: Check Cargo.toml and .tabularium agree on the version
+        run: |
+          MANIFEST_VERSION=$(jq -r .version .tabularium)
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$MANIFEST_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::.tabularium version ($MANIFEST_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
+  pr-title:
+    name: PR title (Conventional Commits)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  markdownlint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run markdownlint
+        run: npx --yes markdownlint-cli "**/*.md"
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      # rustsec/audit-check only files a tracking issue for informational
+      # warnings (e.g. "unmaintained") on cron-scheduled runs, not push/PR
+      # runs.
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  live-db-integration:
+    name: Live Db2 integration
+    # Pinned to 24.04 rather than ubuntu-latest: the IBM clidriver links
+    # against libxml2.so.2, which Ubuntu 26.04 no longer ships (it has
+    # libxml2.so.16), so the driver manager cannot load libdb2.so there.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install unixODBC and the IBM Db2 ODBC/CLI driver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc-dev
+          curl -fSL --retry 3 \
+            https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz \
+            -o /tmp/clidriver.tar.gz
+          sudo mkdir -p /opt/ibm
+          sudo tar xf /tmp/clidriver.tar.gz -C /opt/ibm
+          printf '[Db2]\nDescription = IBM Db2 ODBC Driver\nDriver = /opt/ibm/clidriver/lib/libdb2.so\n' \
+            | sudo tee /etc/odbcinst.ini
+
+      # Db2 Community Edition needs a privileged container and a few minutes
+      # to create the database; the script waits for it and seeds the
+      # TEST_SCHEMA fixtures.
+      - name: Start and seed Db2
+        run: ./scripts/setup-test-db.sh
+
+      - name: Build
+        run: cargo build
+
+      - name: Run live-database integration test
+        env:
+          DB2_TEST: "1"
+          DB2_ODBC_DRIVER: Db2
+          DB2_HOST: 127.0.0.1
+          DB2_PORT: "50000"
+          DB2_DATABASE: TESTDB
+          DB2_USER: db2inst1
+          DB2_PASSWORD: db2test123
+        run: cargo test --test integration -- --test-threads=1
+
+      - name: Db2 container logs
+        if: failure()
+        run: docker logs db2-test --tail 100

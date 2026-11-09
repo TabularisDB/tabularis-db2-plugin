@@ -1,10 +1,25 @@
 [package]
 name = "tabularis-db2-plugin"
-version = "0.0.1"
+version = "0.0.3"
 edition = "2021"
+description = "IBM Db2 plugin driver for Tabularis"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "tabularis-db2-plugin"
+path = "src/main.rs"
+
+[[bin]]
+name = "test_plugin"
+path = "src/bin/test_plugin.rs"
 
 [dependencies]
 odbc-api = "24"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

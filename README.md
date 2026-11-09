@@ -13,18 +13,27 @@
 </div>
 
 # tabularis-db2-plugin
+
 <p align="center">
 
-![](https://img.shields.io/badge/status-WIP-red?style=flat)
+![Status](https://img.shields.io/badge/status-WIP-red?style=flat)
+![Release](https://img.shields.io/github/v/release/TabularisDB/tabularis-db2-plugin?include_prereleases&style=flat)
+![Downloads](https://img.shields.io/github/downloads/TabularisDB/tabularis-db2-plugin/total.svg?style=flat)
+![CI](https://github.com/TabularisDB/tabularis-db2-plugin/workflows/CI/badge.svg)
 [![Discord](https://img.shields.io/discord/1502944695808950282?color=5865F2&logo=discord&logoColor=white)](https://discord.com/invite/K2hmhfHRSt)
 
 </p>
 
 > **Work in progress** — this plugin is under active development. See the [verification checklist](#verification-checklist) below for the current status.
 
-An [IBM Db2](https://www.ibm.com/products/db2) plugin for [Tabularis](https://github.com/debba/tabularis), the lightweight database management tool.
+An [IBM Db2](https://www.ibm.com/products/db2) plugin for [Tabularis](https://github.com/TabularisDB/tabularis), the open-source database client.
 
 This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas and objects, run SQL queries, perform inline CRUD operations, and generate DDL through the Tabularis JSON-RPC plugin interface.
+
+> **Requires Tabularis v0.25.0 or later.** That is the first release that reads
+> the manifest's stable `id` (`db2`) separately from its display name (`Db2`);
+> the plugin will not load on earlier versions of
+> [Tabularis](https://github.com/TabularisDB/tabularis).
 
 **Discord** - [Join our discord server](https://discord.com/invite/K2hmhfHRSt) and chat with the maintainers.
 
@@ -35,14 +44,17 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 - [Supported Db2 Data Types](#supported-db2-data-types)
 - [Requirements](#requirements)
 - [Installation](#installation)
-  - [Automatic (via Tabularis)](#automatic-via-tabularis)
-  - [Manual Installation](#manual-installation)
+  - [From the Tabularium registry](#from-the-tabularium-registry)
+  - [Manual Installation (alternative)](#manual-installation-alternative)
 - [How It Works](#how-it-works)
 - [Supported Operations](#supported-operations)
 - [Building from Source](#building-from-source)
 - [Development](#development)
   - [Docker-based Db2 Environment](#docker-based-db2-environment)
+  - [Contributing: PR Titles & Versioning](#contributing-pr-titles--versioning)
 - [Known Limitations](#known-limitations)
+- [Changelog](#changelog)
+- [Maintainers](#maintainers)
 - [License](#license)
 
 ## Verification Checklist
@@ -50,17 +62,17 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Feature | Status | Issue |
 |---|---|---|
 | Read table data | Verified | — |
-| Schema & object browsing | Not yet verified | [#1](https://github.com/debba/tabularis-db2-plugin/issues/1) |
-| Query execution | Not yet verified | [#2](https://github.com/debba/tabularis-db2-plugin/issues/2) |
-| Insert record | Not yet verified | [#3](https://github.com/debba/tabularis-db2-plugin/issues/3) |
-| Update record | Not yet verified | [#4](https://github.com/debba/tabularis-db2-plugin/issues/4) |
-| Delete record | Not yet verified | [#5](https://github.com/debba/tabularis-db2-plugin/issues/5) |
-| DDL generation | Not yet verified | [#6](https://github.com/debba/tabularis-db2-plugin/issues/6) |
-| View support | Not yet verified | [#7](https://github.com/debba/tabularis-db2-plugin/issues/7) |
-| Index management | Not yet verified | [#8](https://github.com/debba/tabularis-db2-plugin/issues/8) |
-| Foreign key management | Not yet verified | [#9](https://github.com/debba/tabularis-db2-plugin/issues/9) |
-| Routine support | Not yet verified | [#10](https://github.com/debba/tabularis-db2-plugin/issues/10) |
-| Explain query | Verified | [#11](https://github.com/debba/tabularis-db2-plugin/issues/11) |
+| Schema & object browsing | Not yet verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
+| Query execution | Not yet verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
+| Insert record | Not yet verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
+| Update record | Not yet verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
+| Delete record | Not yet verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
+| DDL generation | Not yet verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
+| View support | Not yet verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
+| Index management | Not yet verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
+| Foreign key management | Not yet verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
+| Routine support | Not yet verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
+| Explain query | Verified | [#11](https://github.com/TabularisDB/tabularis-db2-plugin/issues/11) |
 
 ## Features
 
@@ -94,37 +106,36 @@ Typical requirement:
 
 You can configure the driver name from Tabularis through the plugin settings.
 
+On Linux and macOS the driver manager is [unixODBC](https://www.unixodbc.org/)
+(`apt install unixodbc`, `brew install unixodbc`); Windows ships its own. The
+IBM driver itself needs `libxml2.so.2`: distributions that only ship the newer
+`libxml2.so.16` (for example Ubuntu 25.10 and later) need a compatibility
+package providing it, otherwise the driver manager reports
+`Can't open lib '.../libdb2.so' : file not found`.
+
 ## Installation
 
-### Automatic (via Tabularis)
+### From the Tabularium registry
 
-Once the plugin is packaged and published in a registry-compatible format, it can be installed through the Tabularis plugin UI.
+This plugin is published on the [Tabularium registry](https://registry.tabularis.dev).
+Install it from Tabularis's in-app plugin browser: **Settings → Plugins**,
+search for **Db2**, and install.
 
-### Manual Installation
+### Manual Installation (alternative)
 
-1. Build the plugin in release mode:
+1. Download the latest release for your platform from the
+   [Releases page](https://github.com/TabularisDB/tabularis-db2-plugin/releases).
+2. Extract the archive.
+3. Copy `tabularis-db2-plugin` (or `tabularis-db2-plugin.exe` on Windows) and
+   `.tabularium` into the Tabularis plugins directory:
 
-```bash
-cargo build --release
-```
+   | OS | Plugins Directory |
+   | --- | --- |
+   | **Linux** | `~/.local/share/tabularis/plugins/drivers/db2/` |
+   | **macOS** | `~/Library/Application Support/tabularis/plugins/drivers/db2/` |
+   | **Windows** | `%APPDATA%\tabularis\plugins\drivers\db2\` |
 
-2. Copy `tabularis-db2-plugin` (or `tabularis-db2-plugin.exe` on Windows) and `.tabularium` into the Tabularis plugins directory:
-
-| OS | Plugins Directory |
-|---|---|
-| **Linux** | `~/.local/share/tabularis/plugins/db2/` |
-| **macOS** | `~/Library/Application Support/com.debba.tabularis/plugins/db2/` |
-| **Windows** | `%APPDATA%\com.debba.tabularis\plugins\db2\` |
-
-3. Restart Tabularis.
-
-### Local Sync Helper
-
-A convenience script is provided to build and copy the plugin into the local Tabularis plugins directory:
-
-```bash
-./sync.sh
-```
+4. Restart Tabularis.
 
 ## How It Works
 
@@ -183,18 +194,31 @@ The code is intentionally split by responsibility:
 ### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) (edition 2021)
-- Db2 ODBC driver installed locally
+- [`just`](https://github.com/casey/just) (optional, wraps the common cargo invocations)
+- The ODBC driver manager development files (`unixodbc-dev` on Debian/Ubuntu,
+  `brew install unixodbc` on macOS; nothing to install on Windows)
+- A Db2 ODBC driver and a running Db2 instance (for integration tests)
 
 ### Build
+
+```bash
+just build      # debug build
+just release    # release build (what the GitHub Actions workflow ships)
+```
+
+Or directly with cargo:
 
 ```bash
 cargo build --release
 ```
 
-The binary will be available at:
+The binary will be located at `target/release/tabularis-db2-plugin`.
+
+### Install Locally
 
 ```bash
-target/release/tabularis-db2-plugin
+just dev-install   # build + copy binary and manifest into the Tabularis plugins dir
+just uninstall     # remove the installed plugin
 ```
 
 ## Development
@@ -215,26 +239,26 @@ curl -fSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/
   -o /tmp/clidriver.tar.gz
 sudo mkdir -p /opt/ibm
 sudo tar xf /tmp/clidriver.tar.gz -C /opt/ibm
-echo -e "[Db2]\nDescription = IBM Db2 ODBC Driver\nDriver = /opt/ibm/clidriver/lib/libdb2o.so" \
+echo -e "[Db2]\nDescription = IBM Db2 ODBC Driver\nDriver = /opt/ibm/clidriver/lib/libdb2.so" \
   | sudo tee /etc/odbcinst.ini
 ```
 
 #### Start, seed, and manage the test database
 
-A helper script handles the full lifecycle:
+A helper script handles the full lifecycle (the `just` recipes wrap it):
 
 ```bash
 # Start the container and seed TEST_SCHEMA with fixtures
-./scripts/setup-test-db.sh
+just demo-db            # ./scripts/setup-test-db.sh
 
 # Check container health and seed status
-./scripts/setup-test-db.sh status
+just demo-db-status     # ./scripts/setup-test-db.sh status
 
 # Stop and remove the container (including volumes)
-./scripts/setup-test-db.sh teardown
+just demo-db-stop       # ./scripts/setup-test-db.sh teardown
 ```
 
-The first start can take a couple of minutes while Db2 initialises. The script waits up to 300 seconds and streams progress.
+The first start can take several minutes while Db2 creates the database. The script waits up to 600 seconds (override with `DB2_MAX_WAIT`) and streams progress.
 
 #### Connection details
 
@@ -252,21 +276,29 @@ The first start can take a couple of minutes while Db2 initialises. The script w
 Once the container is healthy:
 
 ```bash
-DB2_TEST=1 cargo test --test integration -- --test-threads=1
+just integration   # DB2_TEST=1 cargo test --test integration -- --test-threads=1
 ```
+
+The tests look for an ODBC driver registered as `Db2`; set `DB2_ODBC_DRIVER`
+when your `odbcinst.ini` entry has another name. `DB2_HOST`, `DB2_PORT`,
+`DB2_DATABASE`, `DB2_USER` and `DB2_PASSWORD` override the container defaults.
+The same suite runs in CI as the "Live Db2 integration" job.
 
 > Integration tests are gated behind the `DB2_TEST` environment variable so that `cargo test` alone only runs unit tests (no Db2 connection required).
 
-### Run Unit Tests
+### Running Tests
 
 ```bash
-cargo test
+just test    # cargo test --bins — unit tests for SQL builders, quoting, pagination
+just lint    # clippy -D warnings
+just fmt     # cargo fmt --all
+just validate-manifest   # .tabularium against the live registry schema
 ```
 
 ### Smoke Test the Plugin Process
 
 ```bash
-cargo run --bin test_plugin
+just repl    # cargo run --bin test_plugin
 ```
 
 ### Manual JSON-RPC example
@@ -275,6 +307,37 @@ cargo run --bin test_plugin
 echo '{"jsonrpc":"2.0","method":"initialize","params":{"settings":{}},"id":1}' \
   | ./target/debug/tabularis-db2-plugin
 ```
+
+### Contributing: PR Titles & Versioning
+
+PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`type: subject`, `type(scope): subject`, or `type!: subject` for a breaking
+change) — enforced by CI on every PR. Add a `BREAKING CHANGE:` footer to the
+PR description for breaking changes that don't fit cleanly into the title.
+
+Every PR also needs exactly one `prerelease:alpha` / `prerelease:beta` /
+`prerelease:rc` / `prerelease:stable` label, so CI knows which release
+channel to target when suggesting the next version. There's no default —
+CI fails with a clear error if the label is missing, rather than guessing.
+
+| PR title type | Version impact |
+| --- | --- |
+| `feat` | minor |
+| `fix`, `refactor`, `perf` | patch |
+| `docs`, `style`, `chore`, `test`, `ci`, `build` | none — no release suggested |
+| any type with `!` or a `BREAKING CHANGE:` footer | major |
+
+CI posts a comment on the PR suggesting the next tag/version based on the
+title's type and the `prerelease:*` label — informational only, nothing is
+tagged or released automatically. The suggestion updates (and marks the
+previous suggestion as outdated) only when the underlying classification
+actually changes, not on every edit to the title text.
+
+To release: bump `version` in `.tabularium` and `Cargo.toml` (CI checks they
+agree), add a `## [x.y.z] - YYYY-MM-DD` section to [CHANGELOG.md](./CHANGELOG.md),
+merge, then push the `vx.y.z` tag. The release workflow refuses a tag that
+does not match the manifest, builds every platform, smoke-tests each binary
+and publishes the release with that changelog section as its notes.
 
 ### Tech Stack
 
@@ -290,6 +353,12 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"settings":{}},"id":1}' \
 - Catalog queries were designed using Db2 catalog conventions and DBeaver’s Db2 extension as a reference, but they should still be validated against the specific Db2 edition/version you target.
 - `get_databases` is intentionally conservative and currently returns the active server/database identity instead of enumerating every possible database on an instance.
 
+## [Changelog](./CHANGELOG.md)
+
+## Maintainers
+
+- @debba
+
 ## License
 
-Apache License 2.0
+Apache-2.0.

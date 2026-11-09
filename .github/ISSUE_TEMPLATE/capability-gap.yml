@@ -1,0 +1,41 @@
+name: Capability gap
+description: >-
+  A Tabularis feature that works with other drivers but that the Db2 plugin
+  doesn't support yet.
+title: "Capability gap: "
+labels: ["capability-gap"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for a Tabularis feature the Db2 plugin's declared
+        capabilities don't cover yet (for example triggers, materialized
+        query tables or routine management). For something that is declared
+        but misbehaves, file a bug report instead. Do not include credentials
+        or connection strings.
+  - type: input
+    id: feature
+    attributes:
+      label: Missing feature
+      placeholder: e.g. Triggers, materialized query tables, SSL certificates
+    validations:
+      required: true
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: Tabularis app version
+    validations:
+      required: true
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Anything else that might help scope or reproduce this.
+    validations:
+      required: false

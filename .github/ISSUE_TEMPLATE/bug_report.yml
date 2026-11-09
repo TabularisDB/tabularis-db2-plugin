@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a problem with the Db2 plugin.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: Tabularis app version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. macOS 15.1, Windows 11, Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: db2_version
+    attributes:
+      label: Db2 server version and platform
+      placeholder: e.g. Db2 12.1 for Linux (DB2/LINUXX8664), Db2 for z/OS 13
+    validations:
+      required: true
+  - type: input
+    id: odbc_driver
+    attributes:
+      label: ODBC driver
+      description: The driver configured in the plugin's "ODBC Driver Name" setting, and its version if known.
+      placeholder: e.g. IBM Data Server Driver for ODBC and CLI 12.1
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro_steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: false
+  - type: textarea
+    id: error
+    attributes:
+      label: Error message, if any
+      description: Include the SQLSTATE / SQLCODE (e.g. SQL0104N) when Db2 reported one.
+      render: text
+    validations:
+      required: false

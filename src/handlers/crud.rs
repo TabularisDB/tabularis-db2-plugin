@@ -34,6 +34,7 @@ pub fn insert_record(
     execute_statement(params, settings, schema, &sql)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_record(
     params: &ConnectionParams,
     settings: &PluginSettings,

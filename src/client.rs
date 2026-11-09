@@ -148,7 +148,9 @@ fn fetch_text_rows(mut cursor: impl Cursor) -> PluginResult<TextQueryResult> {
                 )
             };
             if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
-                return Err(format!("SQLGetData failed for column {col} with code {ret}"));
+                return Err(format!(
+                    "SQLGetData failed for column {col} with code {ret}"
+                ));
             }
             // Mask to 32 bits to handle DB2 clidriver writing only lower 32 bits
             let indicator = (indicator as i32) as OdbcLen;

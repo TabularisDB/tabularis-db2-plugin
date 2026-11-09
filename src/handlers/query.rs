@@ -284,35 +284,30 @@ fn build_tree(
     nodes: &mut HashMap<String, ExplainNode>,
     children_map: &HashMap<String, Vec<String>>,
 ) -> ExplainNode {
-    let child_ids: Vec<String> = children_map
-        .get(id)
-        .cloned()
-        .unwrap_or_default();
+    let child_ids: Vec<String> = children_map.get(id).cloned().unwrap_or_default();
     let children: Vec<ExplainNode> = child_ids
         .iter()
         .map(|cid| build_tree(cid, nodes, children_map))
         .collect();
-    let mut node = nodes
-        .remove(id)
-        .unwrap_or_else(|| ExplainNode {
-            id: id.to_string(),
-            node_type: "Unknown".to_string(),
-            relation: None,
-            startup_cost: None,
-            total_cost: None,
-            plan_rows: None,
-            actual_rows: None,
-            actual_time_ms: None,
-            actual_loops: None,
-            buffers_hit: None,
-            buffers_read: None,
-            filter: None,
-            index_condition: None,
-            join_type: None,
-            hash_condition: None,
-            extra: Default::default(),
-            children: vec![],
-        });
+    let mut node = nodes.remove(id).unwrap_or_else(|| ExplainNode {
+        id: id.to_string(),
+        node_type: "Unknown".to_string(),
+        relation: None,
+        startup_cost: None,
+        total_cost: None,
+        plan_rows: None,
+        actual_rows: None,
+        actual_time_ms: None,
+        actual_loops: None,
+        buffers_hit: None,
+        buffers_read: None,
+        filter: None,
+        index_condition: None,
+        join_type: None,
+        hash_condition: None,
+        extra: Default::default(),
+        children: vec![],
+    });
     node.children = children;
     node
 }

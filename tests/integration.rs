@@ -84,10 +84,7 @@ impl Plugin {
                 }
             }),
         );
-        assert!(
-            resp.get("result").is_some(),
-            "initialize failed: {resp}"
-        );
+        assert!(resp.get("result").is_some(), "initialize failed: {resp}");
     }
 
     fn call(&mut self, method: &str, params: Value) -> Value {
@@ -107,7 +104,9 @@ impl Plugin {
         self.stdin.flush().unwrap();
 
         let mut buf = String::new();
-        self.reader.read_line(&mut buf).expect("failed to read response");
+        self.reader
+            .read_line(&mut buf)
+            .expect("failed to read response");
         serde_json::from_str(&buf).expect("invalid JSON response")
     }
 
@@ -154,7 +153,10 @@ fn test_connection_and_ping() {
     let mut p = Plugin::spawn();
 
     let resp = p.call("test_connection", p.base_params());
-    assert!(resp.get("result").is_some(), "test_connection failed: {resp}");
+    assert!(
+        resp.get("result").is_some(),
+        "test_connection failed: {resp}"
+    );
 
     let resp = p.call("ping", p.base_params());
     assert!(resp.get("result").is_some(), "ping failed: {resp}");
@@ -199,12 +201,15 @@ fn test_get_tables() {
 
     let result = p.call_ok("get_tables", p.schema_params(json!({})));
     let tables = result.as_array().expect("expected array");
-    let names: Vec<&str> = tables
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tables.iter().filter_map(|t| t["name"].as_str()).collect();
 
-    for expected in &["DEPARTMENTS", "EMPLOYEES", "PROJECTS", "EMP_PROJECTS", "DATA_TYPES_TEST"] {
+    for expected in &[
+        "DEPARTMENTS",
+        "EMPLOYEES",
+        "PROJECTS",
+        "EMP_PROJECTS",
+        "DATA_TYPES_TEST",
+    ] {
         assert!(
             names.contains(expected),
             "table {expected} not found in: {names:?}"
@@ -239,11 +244,15 @@ fn test_get_columns() {
     let columns = result.as_array().expect("expected array");
 
     // Verify we got all expected columns
-    let col_names: Vec<&str> = columns
-        .iter()
-        .filter_map(|c| c["name"].as_str())
-        .collect();
-    for expected in &["EMP_ID", "FIRST_NAME", "LAST_NAME", "EMAIL", "SALARY", "DEPT_ID"] {
+    let col_names: Vec<&str> = columns.iter().filter_map(|c| c["name"].as_str()).collect();
+    for expected in &[
+        "EMP_ID",
+        "FIRST_NAME",
+        "LAST_NAME",
+        "EMAIL",
+        "SALARY",
+        "DEPT_ID",
+    ] {
         assert!(
             col_names.contains(expected),
             "column {expected} not found in: {col_names:?}"
@@ -339,10 +348,7 @@ fn test_get_views() {
 
     let result = p.call_ok("get_views", p.schema_params(json!({})));
     let views = result.as_array().expect("expected array");
-    let names: Vec<&str> = views
-        .iter()
-        .filter_map(|v| v["name"].as_str())
-        .collect();
+    let names: Vec<&str> = views.iter().filter_map(|v| v["name"].as_str()).collect();
 
     assert!(
         names.contains(&"V_EMP_DETAILS"),
@@ -382,10 +388,7 @@ fn test_get_view_columns() {
         p.schema_params(json!({ "view_name": "V_EMP_DETAILS" })),
     );
     let columns = result.as_array().expect("expected array");
-    let names: Vec<&str> = columns
-        .iter()
-        .filter_map(|c| c["name"].as_str())
-        .collect();
+    let names: Vec<&str> = columns.iter().filter_map(|c| c["name"].as_str()).collect();
 
     assert!(
         names.contains(&"FIRST_NAME"),
@@ -414,7 +417,12 @@ fn test_get_foreign_keys() {
 
     let fk = fks
         .iter()
-        .find(|f| f["name"].as_str().map(|n| n.contains("FK_EMP_DEPT")).unwrap_or(false))
+        .find(|f| {
+            f["name"]
+                .as_str()
+                .map(|n| n.contains("FK_EMP_DEPT"))
+                .unwrap_or(false)
+        })
         .expect("FK_EMP_DEPT not found");
 
     assert_eq!(fk["column_name"].as_str().unwrap().trim(), "DEPT_ID");
@@ -449,10 +457,7 @@ fn test_get_indexes() {
         p.schema_params(json!({ "table": "EMPLOYEES" })),
     );
     let indexes = result.as_array().expect("expected array");
-    let names: Vec<&str> = indexes
-        .iter()
-        .filter_map(|i| i["name"].as_str())
-        .collect();
+    let names: Vec<&str> = indexes.iter().filter_map(|i| i["name"].as_str()).collect();
 
     assert!(
         names.iter().any(|n| n.contains("IDX_EMP_EMAIL")),
@@ -491,10 +496,7 @@ fn test_get_routines() {
 
     let result = p.call_ok("get_routines", p.schema_params(json!({})));
     let routines = result.as_array().expect("expected array");
-    let names: Vec<&str> = routines
-        .iter()
-        .filter_map(|r| r["name"].as_str())
-        .collect();
+    let names: Vec<&str> = routines.iter().filter_map(|r| r["name"].as_str()).collect();
 
     assert!(
         names.contains(&"GET_EMPLOYEES_BY_DEPT"),
@@ -518,10 +520,7 @@ fn test_get_routine_parameters() {
     let params = result.as_array().expect("expected array");
     assert!(params.len() >= 3, "UPDATE_SALARY should have >= 3 params");
 
-    let modes: Vec<&str> = params
-        .iter()
-        .filter_map(|p| p["mode"].as_str())
-        .collect();
+    let modes: Vec<&str> = params.iter().filter_map(|p| p["mode"].as_str()).collect();
     assert!(modes.contains(&"IN"), "should have IN params");
     assert!(modes.contains(&"OUT"), "should have OUT param");
 }
@@ -555,10 +554,7 @@ fn test_get_schema_snapshot() {
     let result = p.call_ok("get_schema_snapshot", p.schema_params(json!({})));
     let tables = result.as_array().expect("expected array");
 
-    let names: Vec<&str> = tables
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tables.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         names.contains(&"EMPLOYEES"),
         "snapshot should include EMPLOYEES"
@@ -910,10 +906,7 @@ fn test_drop_index() {
             "index_name": "IDX_DROP_TEST_NAME"
         })),
     );
-    assert!(
-        resp.get("result").is_some(),
-        "drop_index failed: {resp}"
-    );
+    assert!(resp.get("result").is_some(), "drop_index failed: {resp}");
 
     // Verify index is gone
     let result = p.call_ok(
@@ -921,9 +914,12 @@ fn test_drop_index() {
         p.schema_params(json!({ "table": "DROP_TEST" })),
     );
     let indexes = result.as_array().unwrap();
-    let has_idx = indexes
-        .iter()
-        .any(|i| i["name"].as_str().map(|n| n.contains("IDX_DROP_TEST_NAME")).unwrap_or(false));
+    let has_idx = indexes.iter().any(|i| {
+        i["name"]
+            .as_str()
+            .map(|n| n.contains("IDX_DROP_TEST_NAME"))
+            .unwrap_or(false)
+    });
     assert!(!has_idx, "index should have been dropped");
 }
 
@@ -951,9 +947,12 @@ fn test_drop_foreign_key() {
         p.schema_params(json!({ "table": "DROP_TEST" })),
     );
     let fks = result.as_array().unwrap();
-    let has_fk = fks
-        .iter()
-        .any(|f| f["name"].as_str().map(|n| n.contains("FK_DROP_TEST")).unwrap_or(false));
+    let has_fk = fks.iter().any(|f| {
+        f["name"]
+            .as_str()
+            .map(|n| n.contains("FK_DROP_TEST"))
+            .unwrap_or(false)
+    });
     assert!(!has_fk, "FK should have been dropped");
 }
 
@@ -977,7 +976,10 @@ fn test_explain_query() {
     assert_eq!(result["driver"], json!("db2"));
     assert_eq!(result["has_analyze_data"], json!(false));
     assert!(
-        result["original_query"].as_str().unwrap().contains("EMPLOYEES"),
+        result["original_query"]
+            .as_str()
+            .unwrap()
+            .contains("EMPLOYEES"),
         "should preserve original query"
     );
 
@@ -1022,7 +1024,10 @@ fn test_explain_query_analyze() {
     assert_eq!(result["driver"], json!("db2"));
     assert_eq!(result["has_analyze_data"], json!(true));
     assert!(
-        result["original_query"].as_str().unwrap().contains("EMPLOYEES"),
+        result["original_query"]
+            .as_str()
+            .unwrap()
+            .contains("EMPLOYEES"),
         "should preserve original query"
     );
 }
@@ -1047,7 +1052,10 @@ fn test_explain_query_join() {
     let raw = result["raw_output"].as_str().unwrap_or("");
     // The plan should mention multiple operators for a join.
     assert!(
-        root["children"].as_array().map(|a| !a.is_empty()).unwrap_or(false)
+        root["children"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
             || raw.lines().count() > 1,
         "a JOIN query should produce a multi-node plan"
     );

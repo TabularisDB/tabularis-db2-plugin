@@ -18,7 +18,7 @@
 #     -o /tmp/clidriver.tar.gz
 #   sudo mkdir -p /opt/ibm
 #   sudo tar xf /tmp/clidriver.tar.gz -C /opt/ibm
-#   echo -e "[Db2]\nDescription = IBM Db2 ODBC Driver\nDriver = /opt/ibm/clidriver/lib/libdb2o.so" \
+#   echo -e "[Db2]\nDescription = IBM Db2 ODBC Driver\nDriver = /opt/ibm/clidriver/lib/libdb2.so" \
 #     | sudo tee /etc/odbcinst.ini
 #
 # After setup, run the integration tests:
@@ -30,7 +30,16 @@ CONTAINER_NAME="db2-test"
 DB_NAME="TESTDB"
 DB_USER="db2inst1"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-MAX_WAIT=300  # seconds
+MAX_WAIT="${DB2_MAX_WAIT:-600}"  # seconds
+
+# Compose v2 (`docker compose`) with a fallback to the legacy v1 binary.
+compose() {
+    if docker compose version &>/dev/null; then
+        docker compose "$@"
+    else
+        docker-compose "$@"
+    fi
+}
 
 # ------------------------------------------------------------------
 # Teardown
@@ -38,7 +47,7 @@ MAX_WAIT=300  # seconds
 if [[ "${1:-}" == "teardown" ]]; then
     echo "Stopping and removing DB2 container..."
     cd "$PROJECT_DIR"
-    docker compose down -v 2>/dev/null || docker-compose down -v 2>/dev/null
+    compose down -v
     echo "Done."
     exit 0
 fi
@@ -64,7 +73,7 @@ fi
 # ------------------------------------------------------------------
 echo "==> Starting DB2 container..."
 cd "$PROJECT_DIR"
-docker-compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null
+compose up -d
 
 echo "==> Waiting for DB2 to be ready (max ${MAX_WAIT}s)..."
 elapsed=0
