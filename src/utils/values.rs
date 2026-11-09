@@ -1,5 +1,10 @@
 use serde_json::Value;
 
+/// Renders text as a Db2 string constant (`O'Brien` -> `'O''Brien'`).
+pub fn string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 pub fn json_to_sql_literal(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -11,10 +16,8 @@ pub fn json_to_sql_literal(value: &Value) -> String {
             }
         }
         Value::Number(number) => number.to_string(),
-        Value::String(string) => format!("'{}'", string.replace('\'', "''")),
-        Value::Array(_) | Value::Object(_) => {
-            format!("'{}'", value.to_string().replace('\'', "''"))
-        }
+        Value::String(string) => string_literal(string),
+        Value::Array(_) | Value::Object(_) => string_literal(&value.to_string()),
     }
 }
 
@@ -25,13 +28,9 @@ pub fn text_row_to_json(value: Option<&str>) -> Value {
     }
 }
 
-pub fn bool_from_catalog_flag(value: Option<&str>) -> bool {
-    matches!(value, Some("Y" | "y" | "1" | "true" | "TRUE"))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{bool_from_catalog_flag, json_to_sql_literal, text_row_to_json};
+    use super::{json_to_sql_literal, string_literal, text_row_to_json};
     use serde_json::json;
 
     #[test]
@@ -42,10 +41,10 @@ mod tests {
     }
 
     #[test]
-    fn converts_catalog_booleans() {
-        assert!(bool_from_catalog_flag(Some("Y")));
-        assert!(!bool_from_catalog_flag(Some("N")));
-        assert!(!bool_from_catalog_flag(None));
+    fn quotes_string_constants() {
+        assert_eq!(string_literal("TEST_SCHEMA"), "'TEST_SCHEMA'");
+        assert_eq!(string_literal("O'Brien"), "'O''Brien'");
+        assert_eq!(string_literal(""), "''");
     }
 
     #[test]

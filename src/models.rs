@@ -25,7 +25,11 @@ pub struct ConnectionParams {
     pub username: Option<String>,
     pub password: Option<String>,
     pub database: DatabaseSelection,
+    #[serde(default)]
     pub ssl_mode: Option<String>,
+    /// Seconds to wait for a new connection, when the user set one.
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,17 +39,36 @@ pub struct TableInfo {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TableColumn {
     pub name: String,
+    /// Base type name (`VARCHAR`, `DECIMAL`); the host matches on it for
+    /// value handling, editing and DDL generation.
     pub data_type: String,
     pub is_pk: bool,
     pub is_nullable: bool,
     pub is_auto_increment: bool,
+    /// Column computed by Db2 (`GENERATED ALWAYS AS (...)`, row change
+    /// timestamp): the host leaves it out of inserts.
+    #[serde(default)]
+    pub is_generated: bool,
     pub default_value: Option<String>,
+    /// Declared length, for string and binary types only.
     pub character_maximum_length: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numeric_precision: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numeric_scale: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Declared type with its modifiers (`VARCHAR(50)`, `DECIMAL(10,2)`),
+    /// for display. Sent only when it says more than `data_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_type: Option<String>,
+    /// The default as SQL that can follow `DEFAULT` unchanged, so the column
+    /// editor can restate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_sql: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -204,6 +227,7 @@ mod tests {
             "is_pk": false,
             "is_nullable": true,
             "is_auto_increment": false,
+            "is_generated": false,
             "default_value": null,
             "character_maximum_length": 1048576,
             "comment": COLUMN_COMMENT,

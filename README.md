@@ -62,7 +62,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Feature | Status | Issue |
 |---|---|---|
 | Read table data | Verified | — |
-| Schema & object browsing | Not yet verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
+| Schema & object browsing | Verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
 | Query execution | Not yet verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
 | Insert record | Not yet verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
 | Update record | Not yet verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
@@ -148,7 +148,7 @@ The plugin is a standalone Rust binary that communicates with Tabularis through 
 The code is intentionally split by responsibility:
 
 - `src/main.rs` — request loop and dispatch
-- `src/client.rs` — ODBC connection string construction and query execution
+- `src/client.rs` — ODBC connection string construction, one connection per request, text fetching
 - `src/handlers/metadata.rs` — schemas, tables, columns, views, indexes, FKs, routines
 - `src/handlers/query.rs` — connection test, query execution, explain plan
 - `src/handlers/crud.rs` — insert, update, delete
@@ -162,9 +162,9 @@ The code is intentionally split by responsibility:
 | `initialize` | Loads plugin settings sent by Tabularis |
 | `test_connection` / `ping` | Verifies Db2 connectivity |
 | `get_databases` | Returns the current server/database identity |
-| `get_schemas` | Lists Db2 schemas |
-| `get_tables` | Lists base tables in the selected schema |
-| `get_columns` | Returns column metadata for a table or view |
+| `get_schemas` | Lists the user schemas, empty ones included (Db2's own `SYS*`, `NULLID` and `SQLJ` are left out) |
+| `get_tables` | Lists the tables of the selected schema: base, typed, materialized query and created temporary tables, and nicknames |
+| `get_columns` | Returns column metadata for a table or view: type with length/precision/scale, nullability, key, identity, generated flag, default and comment |
 | `get_foreign_keys` | Lists foreign keys for a table |
 | `get_indexes` | Lists indexes for a table |
 | `get_views` | Lists views in the selected schema |
@@ -250,6 +250,9 @@ A helper script handles the full lifecycle (the `just` recipes wrap it):
 ```bash
 # Start the container and seed TEST_SCHEMA with fixtures
 just demo-db            # ./scripts/setup-test-db.sh
+
+# Drop the fixture schemas and load the fixtures again (keeps the container)
+just demo-db-reseed     # ./scripts/setup-test-db.sh reseed
 
 # Check container health and seed status
 just demo-db-status     # ./scripts/setup-test-db.sh status

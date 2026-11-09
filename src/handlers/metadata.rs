@@ -1,25 +1,44 @@
-use crate::client::query_text_rows;
+use crate::client::Session;
 use crate::error::PluginResult;
 use crate::models::{
-    ConnectionParams, ForeignKey, Index, PluginSettings, RoutineInfo, RoutineParameter,
-    TableColumn, TableInfo, TableSchema, ViewInfo,
+    ForeignKey, Index, RoutineInfo, RoutineParameter, TableColumn, TableInfo, TableSchema, ViewInfo,
 };
-use crate::utils::values::bool_from_catalog_flag;
+use crate::utils::types::describe_catalog_type;
+use crate::utils::values::string_literal;
 use std::collections::HashMap;
 
 fn cell(row: &[Option<String>], index: usize) -> Option<&str> {
     row.get(index).and_then(|value| value.as_deref())
 }
 
-pub fn get_databases(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-) -> PluginResult<Vec<String>> {
-    let result = query_text_rows(
-        params,
-        settings,
-        None,
-        "SELECT CURRENT SERVER AS NAME FROM SYSIBM.SYSDUMMY1 WITH UR",
+fn cell_i64(row: &[Option<String>], index: usize) -> Option<i64> {
+    cell(row, index).and_then(|value| value.trim().parse::<i64>().ok())
+}
+
+/// Catalog text columns hold `NULL` or an empty string for "nothing".
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|text| !text.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+pub fn get_databases(session: &Session) -> PluginResult<Vec<String>> {
+    let result = session.query("SELECT CURRENT SERVER AS NAME FROM SYSIBM.SYSDUMMY1 WITH UR")?;
+    Ok(result
+        .rows
+        .into_iter()
+        .filter_map(|row| row.into_iter().next().flatten())
+        .collect())
+}
+
+/// Lists the schemas a user can browse: every schema in the catalog, empty
+/// ones included, minus the ones Db2 owns (`SYS*`, plus `NULLID` and `SQLJ`,
+/// which hold the driver packages and the JDBC/SQLJ routines).
+pub fn get_schemas(session: &Session) -> PluginResult<Vec<String>> {
+    let result = session.query(
+        "SELECT SCHEMANAME FROM SYSCAT.SCHEMATA \
+         WHERE SCHEMANAME NOT LIKE 'SYS%' AND SCHEMANAME NOT IN ('NULLID', 'SQLJ') \
+         ORDER BY SCHEMANAME WITH UR",
     )?;
     Ok(result
         .rows
@@ -28,59 +47,37 @@ pub fn get_databases(
         .collect())
 }
 
-pub fn get_schemas(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-) -> PluginResult<Vec<String>> {
-    let result = query_text_rows(
-        params,
-        settings,
-        None,
-        "SELECT DISTINCT RTRIM(SCHEMANAME) FROM (\
-            SELECT SCHEMANAME FROM SYSCAT.SCHEMATA WHERE SCHEMANAME NOT LIKE 'SYS%' \
-            UNION \
-            SELECT TABSCHEMA FROM SYSCAT.TABLES WHERE TABSCHEMA NOT LIKE 'SYS%' AND TYPE IN ('T', 'V') \
-        ) AS S ORDER BY 1 WITH UR",
-    )?;
-    Ok(result
-        .rows
-        .into_iter()
-        .filter_map(|row| row.into_iter().next().flatten())
-        .collect())
-}
-
-pub fn get_tables(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-    schema: &str,
-) -> PluginResult<Vec<TableInfo>> {
+/// Lists the tables of a schema: base tables (`T`), typed tables (`U`),
+/// materialized query tables (`S`), created temporary tables (`G`) and
+/// nicknames (`N`). All of them have their columns in `SYSCAT.COLUMNS` and
+/// can be queried like a table. Views are listed by `get_views`; aliases are
+/// left out because the catalog describes no columns for them.
+pub fn get_tables(session: &Session, schema: &str) -> PluginResult<Vec<TableInfo>> {
     let sql = format!(
-        "SELECT TABNAME, REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = '{}' AND TYPE = 'T' ORDER BY TABNAME WITH UR",
-        schema.replace('\'', "''")
+        "SELECT TABNAME, REMARKS FROM SYSCAT.TABLES \
+         WHERE TABSCHEMA = {} AND TYPE IN ('T', 'U', 'S', 'G', 'N') \
+         ORDER BY TABNAME WITH UR",
+        string_literal(schema)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
         .filter_map(|row| {
             cell(&row, 0).map(|name| TableInfo {
                 name: name.to_string(),
-                comment: cell(&row, 1).map(ToString::to_string),
+                comment: non_empty(cell(&row, 1)),
             })
         })
         .collect())
 }
 
-pub fn get_views(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-    schema: &str,
-) -> PluginResult<Vec<ViewInfo>> {
+pub fn get_views(session: &Session, schema: &str) -> PluginResult<Vec<ViewInfo>> {
     let sql = format!(
-        "SELECT VIEWNAME, TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = '{}' ORDER BY VIEWNAME WITH UR",
-        schema.replace('\'', "''")
+        "SELECT VIEWNAME, TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = {} ORDER BY VIEWNAME WITH UR",
+        string_literal(schema)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -94,17 +91,16 @@ pub fn get_views(
 }
 
 pub fn get_view_definition(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
     view_name: &str,
 ) -> PluginResult<String> {
     let sql = format!(
-        "SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = '{}' AND VIEWNAME = '{}' WITH UR",
-        schema.replace('\'', "''"),
-        view_name.replace('\'', "''")
+        "SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = {} AND VIEWNAME = {} WITH UR",
+        string_literal(schema),
+        string_literal(view_name)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -113,41 +109,64 @@ pub fn get_view_definition(
         .unwrap_or_default())
 }
 
+/// Column list shared by `get_columns` and `get_all_columns_batch`; the
+/// table name comes first so the batch can group on it.
+///
+/// Implicitly hidden columns are skipped: `SELECT *` does not return them,
+/// and Tabularis expects the metadata to describe the same columns the grid
+/// shows.
+const COLUMN_SELECT: &str =
+    "SELECT TABNAME, COLNAME, TYPENAME, LENGTH, SCALE, CODEPAGE, KEYSEQ, NULLS, IDENTITY, \
+            GENERATED, DEFAULT, REMARKS \
+     FROM SYSCAT.COLUMNS";
+
+fn column_from_row(row: &[Option<String>]) -> TableColumn {
+    let column_type = describe_catalog_type(
+        cell(row, 2).unwrap_or_default(),
+        cell_i64(row, 3),
+        cell_i64(row, 4),
+        cell_i64(row, 5),
+    );
+    let is_identity = matches!(cell(row, 8), Some("Y"));
+    let default_value = non_empty(cell(row, 10));
+
+    TableColumn {
+        name: cell(row, 1).unwrap_or_default().to_string(),
+        data_type: column_type.data_type,
+        is_pk: cell_i64(row, 6).unwrap_or(0) > 0,
+        is_nullable: matches!(cell(row, 7), Some("Y")),
+        is_auto_increment: is_identity,
+        is_generated: matches!(cell(row, 9), Some("A")) && !is_identity,
+        // SYSCAT.COLUMNS.DEFAULT already holds SQL (`'ACTIVE'`, `1`,
+        // `CURRENT TIMESTAMP`), so it doubles as the restatable default.
+        default_sql: default_value.clone(),
+        default_value,
+        character_maximum_length: column_type.character_maximum_length,
+        numeric_precision: column_type.numeric_precision,
+        numeric_scale: column_type.numeric_scale,
+        comment: non_empty(cell(row, 11)),
+        full_type: column_type.full_type,
+    }
+}
+
+/// Column metadata for a table or a view.
 pub fn get_columns(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
     table_name: &str,
 ) -> PluginResult<Vec<TableColumn>> {
     let sql = format!(
-        "SELECT COLNAME, TYPENAME, KEYSEQ, NULLS, IDENTITY, DEFAULT, LENGTH, REMARKS \
-         FROM SYSCAT.COLUMNS WHERE TABSCHEMA = '{}' AND TABNAME = '{}' ORDER BY COLNO WITH UR",
-        schema.replace('\'', "''"),
-        table_name.replace('\'', "''")
+        "{COLUMN_SELECT} WHERE TABSCHEMA = {} AND TABNAME = {} AND HIDDEN = '' \
+         ORDER BY COLNO WITH UR",
+        string_literal(schema),
+        string_literal(table_name)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
-    Ok(result
-        .rows
-        .into_iter()
-        .map(|row| TableColumn {
-            name: cell(&row, 0).unwrap_or_default().to_string(),
-            data_type: cell(&row, 1).unwrap_or_default().to_string(),
-            is_pk: cell(&row, 2)
-                .and_then(|value| value.parse::<i32>().ok())
-                .unwrap_or(0)
-                > 0,
-            is_nullable: matches!(cell(&row, 3), Some("Y")),
-            is_auto_increment: matches!(cell(&row, 4), Some("Y")),
-            default_value: cell(&row, 5).map(ToString::to_string),
-            character_maximum_length: cell(&row, 6).and_then(|value| value.parse::<u64>().ok()),
-            comment: cell(&row, 7).map(ToString::to_string),
-        })
-        .collect())
+    let result = session.query(&sql)?;
+    Ok(result.rows.iter().map(|row| column_from_row(row)).collect())
 }
 
 pub fn get_foreign_keys(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
     table_name: &str,
 ) -> PluginResult<Vec<ForeignKey>> {
@@ -156,11 +175,11 @@ pub fn get_foreign_keys(
          FROM SYSCAT.REFERENCES R \
          JOIN SYSCAT.KEYCOLUSE FK ON FK.CONSTNAME = R.CONSTNAME AND FK.TABSCHEMA = R.TABSCHEMA AND FK.TABNAME = R.TABNAME \
          JOIN SYSCAT.KEYCOLUSE PK ON PK.CONSTNAME = R.REFKEYNAME AND PK.TABSCHEMA = R.REFTABSCHEMA AND PK.TABNAME = R.REFTABNAME AND PK.COLSEQ = FK.COLSEQ \
-         WHERE R.TABSCHEMA = '{}' AND R.TABNAME = '{}' ORDER BY R.CONSTNAME, FK.COLSEQ WITH UR",
-        schema.replace('\'', "''"),
-        table_name.replace('\'', "''")
+         WHERE R.TABSCHEMA = {} AND R.TABNAME = {} ORDER BY R.CONSTNAME, FK.COLSEQ WITH UR",
+        string_literal(schema),
+        string_literal(table_name)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -175,21 +194,16 @@ pub fn get_foreign_keys(
         .collect())
 }
 
-pub fn get_indexes(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-    schema: &str,
-    table_name: &str,
-) -> PluginResult<Vec<Index>> {
+pub fn get_indexes(session: &Session, schema: &str, table_name: &str) -> PluginResult<Vec<Index>> {
     let sql = format!(
         "SELECT I.INDNAME, C.COLNAME, I.UNIQUERULE, I.INDEXTYPE, C.COLSEQ \
          FROM SYSCAT.INDEXES I \
          JOIN SYSCAT.INDEXCOLUSE C ON C.INDSCHEMA = I.INDSCHEMA AND C.INDNAME = I.INDNAME \
-         WHERE I.TABSCHEMA = '{}' AND I.TABNAME = '{}' ORDER BY I.INDNAME, C.COLSEQ WITH UR",
-        schema.replace('\'', "''"),
-        table_name.replace('\'', "''")
+         WHERE I.TABSCHEMA = {} AND I.TABNAME = {} ORDER BY I.INDNAME, C.COLSEQ WITH UR",
+        string_literal(schema),
+        string_literal(table_name)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -205,16 +219,12 @@ pub fn get_indexes(
         .collect())
 }
 
-pub fn get_routines(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-    schema: &str,
-) -> PluginResult<Vec<RoutineInfo>> {
+pub fn get_routines(session: &Session, schema: &str) -> PluginResult<Vec<RoutineInfo>> {
     let sql = format!(
-        "SELECT ROUTINENAME, ROUTINETYPE, TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = '{}' ORDER BY ROUTINENAME WITH UR",
-        schema.replace('\'', "''")
+        "SELECT ROUTINENAME, ROUTINETYPE, TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = {} ORDER BY ROUTINENAME WITH UR",
+        string_literal(schema)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -227,18 +237,17 @@ pub fn get_routines(
 }
 
 pub fn get_routine_parameters(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
     routine_name: &str,
 ) -> PluginResult<Vec<RoutineParameter>> {
     let sql = format!(
         "SELECT PARMNAME, TYPENAME, ROWTYPE, ORDINAL FROM SYSCAT.ROUTINEPARMS \
-         WHERE ROUTINESCHEMA = '{}' AND ROUTINENAME = '{}' ORDER BY ORDINAL WITH UR",
-        schema.replace('\'', "''"),
-        routine_name.replace('\'', "''")
+         WHERE ROUTINESCHEMA = {} AND ROUTINENAME = {} ORDER BY ORDINAL WITH UR",
+        string_literal(schema),
+        string_literal(routine_name)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -259,17 +268,16 @@ pub fn get_routine_parameters(
 }
 
 pub fn get_routine_definition(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
     routine_name: &str,
 ) -> PluginResult<String> {
     let sql = format!(
-        "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = '{}' AND ROUTINENAME = '{}' FETCH FIRST 1 ROW ONLY WITH UR",
-        schema.replace('\'', "''"),
-        routine_name.replace('\'', "''")
+        "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = {} AND ROUTINENAME = {} FETCH FIRST 1 ROW ONLY WITH UR",
+        string_literal(schema),
+        string_literal(routine_name)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
+    let result = session.query(&sql)?;
     Ok(result
         .rows
         .into_iter()
@@ -278,84 +286,78 @@ pub fn get_routine_definition(
         .unwrap_or_default())
 }
 
+/// Column metadata for every table and view of a schema, keyed by table
+/// name. `tables` narrows the result to the named tables when given.
 pub fn get_all_columns_batch(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
+    tables: Option<&[String]>,
 ) -> PluginResult<HashMap<String, Vec<TableColumn>>> {
     let sql = format!(
-        "SELECT TABNAME, COLNAME, TYPENAME, KEYSEQ, NULLS, IDENTITY, DEFAULT, LENGTH, REMARKS \
-         FROM SYSCAT.COLUMNS WHERE TABSCHEMA = '{}' ORDER BY TABNAME, COLNO WITH UR",
-        schema.replace('\'', "''")
+        "{COLUMN_SELECT} WHERE TABSCHEMA = {} AND HIDDEN = '' ORDER BY TABNAME, COLNO WITH UR",
+        string_literal(schema)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
-    let mut map = HashMap::new();
-    for row in result.rows {
-        let table_name = cell(&row, 0).unwrap_or_default().to_string();
-        map.entry(table_name)
-            .or_insert_with(Vec::new)
-            .push(TableColumn {
-                name: cell(&row, 1).unwrap_or_default().to_string(),
-                data_type: cell(&row, 2).unwrap_or_default().to_string(),
-                is_pk: cell(&row, 3)
-                    .and_then(|value| value.parse::<i32>().ok())
-                    .unwrap_or(0)
-                    > 0,
-                is_nullable: bool_from_catalog_flag(cell(&row, 4)),
-                is_auto_increment: bool_from_catalog_flag(cell(&row, 5)),
-                default_value: cell(&row, 6).map(ToString::to_string),
-                character_maximum_length: cell(&row, 7).and_then(|value| value.parse::<u64>().ok()),
-                comment: cell(&row, 8).map(ToString::to_string),
-            });
+    let result = session.query(&sql)?;
+    let mut map: HashMap<String, Vec<TableColumn>> = HashMap::new();
+    for row in &result.rows {
+        let table_name = cell(row, 0).unwrap_or_default();
+        if tables.is_some_and(|wanted| !wanted.iter().any(|name| name == table_name)) {
+            continue;
+        }
+        map.entry(table_name.to_string())
+            .or_default()
+            .push(column_from_row(row));
     }
     Ok(map)
 }
 
 pub fn get_all_foreign_keys_batch(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     schema: &str,
+    tables: Option<&[String]>,
 ) -> PluginResult<HashMap<String, Vec<ForeignKey>>> {
     let sql = format!(
         "SELECT R.TABNAME, R.CONSTNAME, FK.COLNAME, R.REFTABNAME, PK.COLNAME, R.DELETERULE, R.UPDATERULE \
          FROM SYSCAT.REFERENCES R \
          JOIN SYSCAT.KEYCOLUSE FK ON FK.CONSTNAME = R.CONSTNAME AND FK.TABSCHEMA = R.TABSCHEMA AND FK.TABNAME = R.TABNAME \
          JOIN SYSCAT.KEYCOLUSE PK ON PK.CONSTNAME = R.REFKEYNAME AND PK.TABSCHEMA = R.REFTABSCHEMA AND PK.TABNAME = R.REFTABNAME AND PK.COLSEQ = FK.COLSEQ \
-         WHERE R.TABSCHEMA = '{}' ORDER BY R.TABNAME, R.CONSTNAME, FK.COLSEQ WITH UR",
-        schema.replace('\'', "''")
+         WHERE R.TABSCHEMA = {} ORDER BY R.TABNAME, R.CONSTNAME, FK.COLSEQ WITH UR",
+        string_literal(schema)
     );
-    let result = query_text_rows(params, settings, Some(schema), &sql)?;
-    let mut map = HashMap::new();
-    for row in result.rows {
-        let table_name = cell(&row, 0).unwrap_or_default().to_string();
-        map.entry(table_name)
-            .or_insert_with(Vec::new)
+    let result = session.query(&sql)?;
+    let mut map: HashMap<String, Vec<ForeignKey>> = HashMap::new();
+    for row in &result.rows {
+        let table_name = cell(row, 0).unwrap_or_default();
+        if tables.is_some_and(|wanted| !wanted.iter().any(|name| name == table_name)) {
+            continue;
+        }
+        map.entry(table_name.to_string())
+            .or_default()
             .push(ForeignKey {
-                name: cell(&row, 1).unwrap_or_default().to_string(),
-                column_name: cell(&row, 2).unwrap_or_default().to_string(),
-                ref_table: cell(&row, 3).unwrap_or_default().to_string(),
-                ref_column: cell(&row, 4).unwrap_or_default().to_string(),
-                on_delete: cell(&row, 5).map(ToString::to_string),
-                on_update: cell(&row, 6).map(ToString::to_string),
+                name: cell(row, 1).unwrap_or_default().to_string(),
+                column_name: cell(row, 2).unwrap_or_default().to_string(),
+                ref_table: cell(row, 3).unwrap_or_default().to_string(),
+                ref_column: cell(row, 4).unwrap_or_default().to_string(),
+                on_delete: cell(row, 5).map(ToString::to_string),
+                on_update: cell(row, 6).map(ToString::to_string),
             });
     }
     Ok(map)
 }
 
-pub fn get_schema_snapshot(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-    schema: &str,
-) -> PluginResult<Vec<TableSchema>> {
-    let tables = get_tables(params, settings, schema)?;
-    let columns_map = get_all_columns_batch(params, settings, schema)?;
-    let fks_map = get_all_foreign_keys_batch(params, settings, schema)?;
+/// Every table of a schema with its columns and foreign keys, for the ER
+/// diagram. Three catalog queries on one connection, whatever the number of
+/// tables.
+pub fn get_schema_snapshot(session: &Session, schema: &str) -> PluginResult<Vec<TableSchema>> {
+    let tables = get_tables(session, schema)?;
+    let mut columns_map = get_all_columns_batch(session, schema, None)?;
+    let mut fks_map = get_all_foreign_keys_batch(session, schema, None)?;
     Ok(tables
         .into_iter()
         .map(|table| TableSchema {
-            name: table.name.clone(),
-            columns: columns_map.get(&table.name).cloned().unwrap_or_default(),
-            foreign_keys: fks_map.get(&table.name).cloned().unwrap_or_default(),
+            columns: columns_map.remove(&table.name).unwrap_or_default(),
+            foreign_keys: fks_map.remove(&table.name).unwrap_or_default(),
+            name: table.name,
         })
         .collect())
 }

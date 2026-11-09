@@ -4,6 +4,7 @@
 #
 # Usage:
 #   ./scripts/setup-test-db.sh          # start DB2 + seed data
+#   ./scripts/setup-test-db.sh reseed    # drop the fixtures and load them again
 #   ./scripts/setup-test-db.sh teardown  # stop + remove container
 #   ./scripts/setup-test-db.sh status    # check container health
 #
@@ -91,6 +92,23 @@ done
 echo ""
 echo "==> DB2 is ready!"
 
+# Runs a fixture file inside the container. $1: file under tests/fixtures,
+# $2: db2 CLP options (statement terminator and verbosity).
+run_fixture() {
+    docker cp "$PROJECT_DIR/tests/fixtures/$1" "$CONTAINER_NAME":"/tmp/$1"
+    docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
+        "db2 connect to $DB_NAME >/dev/null && db2 $2 /tmp/$1"
+}
+
+# ------------------------------------------------------------------
+# Reseed: drop the fixture schemas so they are loaded from scratch
+# ------------------------------------------------------------------
+if [[ "${1:-}" == "reseed" ]]; then
+    echo "==> Dropping fixture schemas..."
+    # Dropping a schema that does not exist is an error; that is fine here.
+    run_fixture teardown.sql "-tf" >/dev/null || true
+fi
+
 # ------------------------------------------------------------------
 # Check if already seeded
 # ------------------------------------------------------------------
@@ -99,35 +117,31 @@ already_seeded=$(docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
     2>/dev/null | tr -d ' ' || echo "0")
 
 if [[ "$already_seeded" -gt 0 ]]; then
-    echo "==> TEST_SCHEMA already exists, skipping seed."
+    echo "==> TEST_SCHEMA already exists, skipping seed (use 'reseed' to reload the fixtures)."
 else
     echo "==> Seeding database..."
 
-    # Copy fixtures into container
-    docker cp "$PROJECT_DIR/tests/fixtures/setup.sql" "$CONTAINER_NAME":/tmp/setup.sql
-    docker cp "$PROJECT_DIR/tests/fixtures/routines.sql" "$CONTAINER_NAME":/tmp/routines.sql
-    docker cp "$PROJECT_DIR/tests/fixtures/comments.sql" "$CONTAINER_NAME":/tmp/comments.sql
-    docker cp "$PROJECT_DIR/tests/fixtures/explain_setup.sql" "$CONTAINER_NAME":/tmp/explain_setup.sql
-
     # Run table/data setup (semicolon-terminated)
     echo "  Creating tables, views, indexes, and test data..."
-    docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
-        "db2 connect to $DB_NAME && db2 -tvf /tmp/setup.sql"
+    run_fixture setup.sql "-tvf"
 
     # Run routines (@ terminated)
     echo "  Creating stored procedures and functions..."
-    docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
-        "db2 connect to $DB_NAME && db2 -td@ -vf /tmp/routines.sql"
+    run_fixture routines.sql "-td@ -vf"
 
     # Add table and column comments (including multiline Unicode fixtures)
     echo "  Adding metadata comments..."
-    docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
-        "db2 connect to $DB_NAME && db2 -td@ -vf /tmp/comments.sql"
+    run_fixture comments.sql "-td@ -vf"
+
+    # Schemas, names and column types that exercise the catalog edge cases
+    echo "  Creating edge-case schemas and tables..."
+    run_fixture edge_cases.sql "-tvf"
 
     # Create explain tables for EXPLAIN PLAN support
+    # SYSINSTALLOBJECTS fails when the tables are already there, which is
+    # the case on a reseed: they live in SYSTOOLS, not in a fixture schema.
     echo "  Creating explain tables..."
-    docker exec "$CONTAINER_NAME" su - "$DB_USER" -c \
-        "db2 connect to $DB_NAME && db2 -tvf /tmp/explain_setup.sql"
+    run_fixture explain_setup.sql "-tvf" || echo "  (explain tables already exist)"
 
     echo "==> Seed complete."
 fi

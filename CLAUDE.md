@@ -46,16 +46,23 @@ Fixtures live in `tests/fixtures/` and are loaded by
 `scripts/setup-test-db.sh`. A test that mutates data must leave the fixtures
 as it found them, or use the tables reserved for that (`CRUD_TEST`,
 `DROP_TEST`): the suite runs single-threaded against one shared database.
+`just demo-db-reseed` drops the fixture schemas and loads them again without
+recreating the container.
 
 ## Architecture Rules
 
 - `src/main.rs` owns the JSON-RPC loop and dispatch. Handlers live in
   `src/handlers/`, organized by domain (`metadata`, `query`, `crud`, `ddl`),
   and return `PluginResult<T>` (`Result<T, String>`).
-- Db2 access goes through `src/client.rs` (ODBC via `odbc-api`). Result sets
-  are fetched as text with raw `SQLFetch`/`SQLGetData` calls: the IBM
-  clidriver writes only 32-bit length indicators on 64-bit platforms, which
-  `odbc-api`'s own buffers misread. Keep new fetch code on that path.
+- Db2 access goes through `src/client.rs` (ODBC via `odbc-api`). A request
+  opens one `Session` (one connection) and runs all of its statements on it;
+  the selected schema is applied with `SET CURRENT SCHEMA '<name>'`, which
+  keeps delimited names intact. Result sets are fetched as text with raw
+  `SQLFetch`/`SQLGetData` calls: the IBM clidriver writes only 32-bit length
+  indicators on 64-bit platforms, which `odbc-api`'s own buffers misread.
+  Keep new fetch code on that path.
+- ODBC errors reach the user through `error::odbc_error`, which keeps the
+  Db2 message and drops the ODBC call name and driver tags.
 - Pure helpers (identifier quoting, literals, pagination math, type
   rendering) live in `src/utils/` with unit tests next to them.
 - Never write to `stdout` outside the JSON-RPC responses in `main.rs` — any

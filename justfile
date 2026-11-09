@@ -49,6 +49,10 @@ validate-manifest:
 demo-db:
     ./scripts/setup-test-db.sh
 
+# Drop the fixture schemas and load the fixtures again (container kept).
+demo-db-reseed:
+    ./scripts/setup-test-db.sh reseed
+
 # Show the Db2 container health and seed status.
 demo-db-status:
     ./scripts/setup-test-db.sh status

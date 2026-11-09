@@ -1,14 +1,12 @@
-use crate::client::execute_statement;
+use crate::client::Session;
 use crate::error::PluginResult;
-use crate::models::{ConnectionParams, PluginSettings};
 use crate::utils::identifiers::{quote_identifier, quote_qualified_name};
 use crate::utils::values::json_to_sql_literal;
 use serde_json::Value;
 use std::collections::HashMap;
 
 pub fn insert_record(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     table: &str,
     data: &HashMap<String, Value>,
     schema: Option<&str>,
@@ -31,13 +29,11 @@ pub fn insert_record(
         columns,
         values
     );
-    execute_statement(params, settings, schema, &sql)
+    session.execute(&sql)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn update_record(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     table: &str,
     pk_col: &str,
     pk_val: &Value,
@@ -53,12 +49,11 @@ pub fn update_record(
         quote_identifier(pk_col),
         json_to_sql_literal(pk_val)
     );
-    execute_statement(params, settings, schema, &sql)
+    session.execute(&sql)
 }
 
 pub fn delete_record(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     table: &str,
     pk_col: &str,
     pk_val: &Value,
@@ -70,5 +65,5 @@ pub fn delete_record(
         quote_identifier(pk_col),
         json_to_sql_literal(pk_val)
     );
-    execute_statement(params, settings, schema, &sql)
+    session.execute(&sql)
 }
