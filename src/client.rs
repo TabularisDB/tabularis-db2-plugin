@@ -4,7 +4,8 @@ use crate::utils::blob::{encode_blob_preview, MAX_BLOB_PREVIEW_SIZE};
 use crate::utils::identifiers::quote_identifier;
 use crate::utils::values::string_literal;
 use odbc_api::handles::{AsStatementRef, Record, Statement};
-use odbc_api::{Connection, ConnectionOptions, Cursor, Environment};
+use odbc_api::parameter::InputParameter;
+use odbc_api::{Connection, ConnectionOptions, Cursor, Environment, IntoParameter};
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -137,6 +138,30 @@ pub struct TextQueryResult {
 pub struct Window {
     pub offset: u64,
     pub limit: u64,
+}
+
+/// A value bound to a `?` parameter marker.
+///
+/// Text and binary data travel as parameters rather than as SQL literals: a
+/// string constant is limited to 32,672 bytes, which a CLOB or a BLOB easily
+/// exceeds, and a parameter needs no quoting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl Param {
+    fn boxed(&self) -> Box<dyn InputParameter> {
+        match self {
+            Self::Text(text) => Box::new(text.clone().into_parameter()),
+            Self::Bytes(bytes) => Box::new(bytes.clone().into_parameter()),
+        }
+    }
+}
+
+fn boxed_params(params: &[Param]) -> Vec<Box<dyn InputParameter>> {
+    params.iter().map(Param::boxed).collect()
 }
 
 /// What running a statement produced.
@@ -298,6 +323,42 @@ impl Session {
             return Ok(0);
         }
         Ok(affected_rows(&mut statement))
+    }
+
+    /// Like [`Self::execute`], with values bound to the statement's `?`
+    /// markers in order.
+    pub fn execute_with(&self, sql: &str, params: &[Param]) -> PluginResult<u64> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        let bound = boxed_params(params);
+        if let Some(cursor) = statement
+            .execute(sql, bound.as_slice())
+            .map_err(odbc_error)?
+        {
+            release_cursor(cursor);
+            return Ok(0);
+        }
+        Ok(affected_rows(&mut statement))
+    }
+
+    /// Runs a query with bound parameters and returns the first column of
+    /// its first row as raw bytes, read in full; `None` when the query
+    /// returns no row or the value is NULL.
+    pub fn fetch_bytes(&self, sql: &str, params: &[Param]) -> PluginResult<Option<Vec<u8>>> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        let bound = boxed_params(params);
+        let Some(mut cursor) = statement
+            .execute(sql, bound.as_slice())
+            .map_err(odbc_error)?
+        else {
+            return Err("The query did not return a result set".to_string());
+        };
+        let result = match fetch_next(&mut cursor) {
+            Ok(true) => read_binary_cell(&mut cursor, 1),
+            Ok(false) => Ok(None),
+            Err(error) => Err(error),
+        };
+        release_cursor(cursor);
+        result
     }
 
     /// Runs any statement and reports what it produced. Whether it is a query
@@ -464,6 +525,55 @@ fn read_blob_cell(cursor: &mut impl Cursor, column: u16) -> PluginResult<Option<
     };
     let preview = &buffer[..total.min(buffer.len())];
     Ok(Some(encode_blob_preview(preview, total)))
+}
+
+/// Reads one cell as raw bytes, however long it is (see [`read_cell`] for
+/// why this goes through raw `SQLGetData` calls).
+fn read_binary_cell(cursor: &mut impl Cursor, column: u16) -> PluginResult<Option<Vec<u8>>> {
+    let statement = cursor.as_stmt_ref().as_sys().0 as OdbcHandle;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut bytes: Vec<u8> = Vec::new();
+
+    loop {
+        let mut indicator: OdbcLen = 0;
+        let ret = unsafe {
+            SQLGetData(
+                statement,
+                column,
+                SQL_C_BINARY,
+                buffer.as_mut_ptr() as *mut c_void,
+                buffer.len() as OdbcLen,
+                &mut indicator,
+            )
+        };
+        if ret == SQL_NO_DATA {
+            break;
+        }
+        if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
+            return Err(statement_error(cursor, "SQLGetData", ret));
+        }
+
+        let indicator = (indicator as i32) as OdbcLen;
+        if indicator == SQL_NULL_DATA {
+            return Ok(None);
+        }
+
+        // Binary data is not NUL-terminated: a full buffer is a full piece.
+        let truncated = ret == SQL_SUCCESS_WITH_INFO
+            && (indicator == SQL_NO_TOTAL || indicator as usize > buffer.len());
+        let piece = if truncated {
+            buffer.len()
+        } else {
+            (indicator.max(0) as usize).min(buffer.len())
+        };
+        bytes.extend_from_slice(&buffer[..piece]);
+
+        if !truncated {
+            break;
+        }
+    }
+
+    Ok(Some(bytes))
 }
 
 /// Advances the cursor one row; `false` at the end of the result set. An

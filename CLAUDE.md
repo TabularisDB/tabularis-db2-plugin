@@ -70,6 +70,11 @@ recreating the container.
   panics.
 - Result values are typed by `utils::values::cell_to_json` from the column's
   `ColumnKind`. `DECIMAL`/`DECFLOAT` stay text on purpose (no digit lost).
+- Values written to Db2 go through `utils::binding::bind_value`, which
+  renders a JSON value for the type of its column: numbers and booleans as
+  validated literals, text and binary data as bound parameters (`Param`),
+  never as text spliced into the statement. `crud::row_condition` builds
+  the `WHERE` of a row from the host's `pk_map` the same way.
 - ODBC errors reach the user through `error::odbc_error`, which keeps the
   Db2 message and drops the ODBC call name and driver tags.
 - Pure helpers (identifier quoting, literals, pagination math, type

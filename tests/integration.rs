@@ -1666,6 +1666,474 @@ fn test_crud_insert_update_delete() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — Insert record
+// ---------------------------------------------------------------------------
+
+/// Rows the insert tests add to TYPE_METADATA_TEST use ids from 1000 up, so
+/// they can be removed without touching the fixture rows.
+fn delete_inserted_type_rows(p: &mut Plugin) {
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID >= 1000",
+        Value::Null,
+        1,
+    );
+}
+
+/// One row of TYPE_METADATA_TEST as a `column -> value` map.
+fn type_row(p: &mut Plugin, id: i64) -> serde_json::Map<String, Value> {
+    let result = p.query_ok(
+        &format!("SELECT * FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = {id}"),
+        json!(1),
+        1,
+    );
+    let columns = result["columns"].as_array().unwrap();
+    let row = result["rows"][0]
+        .as_array()
+        .unwrap_or_else(|| panic!("row {id} not found"));
+    columns
+        .iter()
+        .zip(row)
+        .map(|(column, value)| (column.as_str().unwrap().to_string(), value.clone()))
+        .collect()
+}
+
+#[test]
+fn test_insert_record_all_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+
+    // Every value as a string, which is what the grid sends for a typed cell.
+    let inserted = p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": "1000",
+                "COL_CHAR": "xyz",
+                "COL_VARCHAR": "O'Brien \"q\" 所有; DROP TABLE X; --",
+                "COL_BIT_DATA": "CAFEBABE",
+                "COL_GRAPHIC": "グラ",
+                "COL_VARGRAPHIC": "变长",
+                "COL_SMALLINT": "7",
+                "COL_INTEGER": "-42",
+                "COL_DECIMAL": "1234.5678",
+                "COL_DECFLOAT16": "1.5",
+                "COL_DECFLOAT34": "12345678901234567890.123456789",
+                "COL_REAL": "1.25",
+                "COL_DOUBLE": "75000.5",
+                "COL_BOOLEAN": "true",
+                "COL_DATE": "2024-02-29",
+                "COL_TIME": "13:45:10",
+                "COL_TIMESTAMP": "2024-02-29T13:45:10.123456",
+                "COL_TIMESTAMP12": "2024-02-29 13:45:10.123456789012",
+                "COL_CLOB": "clob",
+                "COL_DBCLOB": "dbclob 文本",
+                "COL_BLOB": "BLOB:4:application/octet-stream:yv66vg==",
+                "COL_BINARY": "00112233445566778899AABBCCDDEEFF",
+                "COL_VARBINARY": "DEADBEEF",
+                "COL_XML": "<a><b>1</b></a>"
+            }
+        })),
+    );
+    assert_eq!(inserted, json!(1), "one row inserted");
+
+    let row = type_row(&mut p, 1000);
+    for (name, expected) in [
+        ("ID", json!(1000)),
+        ("COL_CHAR", json!("xyz       ")),
+        ("COL_VARCHAR", json!("O'Brien \"q\" 所有; DROP TABLE X; --")),
+        ("COL_BIT_DATA", json!("CAFEBABE")),
+        ("COL_GRAPHIC", json!("グラ  ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!(7)),
+        ("COL_INTEGER", json!(-42)),
+        ("COL_DECIMAL", json!("1234.5678")),
+        ("COL_DECFLOAT16", json!("1.5")),
+        ("COL_DECFLOAT34", json!("12345678901234567890.123456789")),
+        ("COL_REAL", json!(1.25)),
+        ("COL_DOUBLE", json!(75000.5)),
+        ("COL_BOOLEAN", json!(true)),
+        ("COL_DATE", json!("2024-02-29")),
+        ("COL_TIME", json!("13:45:10")),
+        ("COL_TIMESTAMP", json!("2024-02-29 13:45:10.123456")),
+        ("COL_TIMESTAMP12", json!("2024-02-29 13:45:10.123456789012")),
+        ("COL_CLOB", json!("clob")),
+        ("COL_DBCLOB", json!("dbclob 文本")),
+        (
+            "COL_BLOB",
+            json!("BLOB:4:application/octet-stream:yv66vg=="),
+        ),
+        ("COL_BINARY", json!("00112233445566778899AABBCCDDEEFF")),
+        ("COL_VARBINARY", json!("DEADBEEF")),
+        // Computed by Db2 from COL_VARCHAR.
+        ("COL_COMPUTED", json!(36)),
+    ] {
+        assert_eq!(row[name], expected, "{name}");
+    }
+    assert!(row["COL_XML"]
+        .as_str()
+        .unwrap()
+        .ends_with("<a><b>1</b></a>"));
+
+    // The same row from native JSON values.
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1001, "COL_SMALLINT": 3, "COL_INTEGER": -1, "COL_DECIMAL": 12.5,
+                "COL_DOUBLE": 1e3, "COL_BOOLEAN": false, "COL_VARCHAR": 12
+            }
+        })),
+    );
+    let row = type_row(&mut p, 1001);
+    assert_eq!(row["COL_SMALLINT"], json!(3));
+    assert_eq!(row["COL_DECIMAL"], json!("12.5000"));
+    assert_eq!(row["COL_DOUBLE"], json!(1000.0));
+    assert_eq!(row["COL_BOOLEAN"], json!(false));
+    assert_eq!(row["COL_VARCHAR"], json!("12"));
+
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_insert_record_nulls_and_defaults() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+
+    // NULL, "use the default", and a cleared numeric / date / boolean cell
+    // (an empty string), which means "no value" rather than 0 or ''.
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1002,
+                "COL_CHAR": "__USE_DEFAULT__",
+                "COL_SMALLINT": "__USE_DEFAULT__",
+                "COL_VARCHAR": null,
+                "COL_INTEGER": "",
+                "COL_DECIMAL": "  ",
+                "COL_DATE": "",
+                "COL_BOOLEAN": "",
+                "COL_CLOB": "",
+                "COL_BLOB": null
+            }
+        })),
+    );
+    let row = type_row(&mut p, 1002);
+    assert_eq!(row["COL_CHAR"], json!("N/A       "), "column default");
+    assert_eq!(row["COL_SMALLINT"], json!(1), "column default");
+    for name in [
+        "COL_VARCHAR",
+        "COL_INTEGER",
+        "COL_DECIMAL",
+        "COL_DATE",
+        "COL_BOOLEAN",
+        "COL_BLOB",
+    ] {
+        assert_eq!(row[name], Value::Null, "{name}");
+    }
+    // For text, an empty string is an empty string.
+    assert_eq!(row["COL_CLOB"], json!(""));
+    // A column that was not mentioned gets its default.
+    assert!(row["COL_TIMESTAMP"].as_str().is_some());
+
+    // No values at all: a row of defaults (the identity generates the key).
+    let before = p.query_ok(
+        "SELECT MAX(ID) FROM TEST_SCHEMA.TYPE_METADATA_TEST",
+        Value::Null,
+        1,
+    );
+    let inserted = p.call_ok(
+        "insert_record",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST", "data": {} })),
+    );
+    assert_eq!(inserted, json!(1));
+    let after = p.query_ok(
+        "SELECT ID, COL_CHAR, COL_BOOLEAN FROM TEST_SCHEMA.TYPE_METADATA_TEST ORDER BY COL_TIMESTAMP DESC",
+        json!(1),
+        1,
+    );
+    assert_eq!(after["rows"][0][1], json!("N/A       "));
+    assert_eq!(after["rows"][0][2], json!(false));
+    let generated = after["rows"][0][0].as_i64().unwrap();
+    assert_ne!(Some(generated), before["rows"][0][0].as_i64());
+    p.query_ok(
+        &format!("DELETE FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = {generated}"),
+        Value::Null,
+        1,
+    );
+
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_insert_record_large_values() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+
+    // A 280,000-byte CLOB: far beyond the 32,672 bytes a string constant
+    // may hold, so it only works as a bound parameter.
+    let clob = "€uro-".repeat(40_000);
+
+    // A 1 MiB BLOB handed over as a file, the way Tabularis passes a picked
+    // or uploaded file.
+    let bytes: Vec<u8> = (0..1_048_576u32).map(|i| (i * 31 % 251) as u8).collect();
+    let path = std::env::temp_dir().join(format!("db2-plugin-it-{}.bin", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1003,
+                "COL_CLOB": clob,
+                "COL_BLOB": format!("BLOB_FILE_REF:{}:application/octet-stream:{}", bytes.len(), path.display())
+            },
+            "max_blob_size": 4 * 1024 * 1024
+        })),
+    );
+
+    let stored = p.query_ok(
+        "SELECT LENGTH(COL_CLOB), LENGTH(COL_BLOB), COL_CLOB, COL_BLOB FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = 1003",
+        json!(1),
+        1,
+    );
+    let row = &stored["rows"][0];
+    assert_eq!(row[0], json!(280_000), "bytes of text stored");
+    assert_eq!(row[1], json!(1_048_576), "bytes stored");
+    assert_eq!(row[2].as_str().unwrap(), clob);
+    // In a result set a BLOB is a preview with its true size.
+    assert!(row[3].as_str().unwrap().starts_with("BLOB:1048576:"));
+
+    let key =
+        json!({ "table": "TYPE_METADATA_TEST", "col_name": "COL_BLOB", "pk_map": { "ID": 1003 } });
+
+    // fetch_blob_as_data_url returns every byte.
+    let wire = p.call_ok("fetch_blob_as_data_url", p.schema_params(key.clone()));
+    let wire = wire.as_str().unwrap();
+    let prefix = "BLOB:1048576:application/octet-stream:";
+    assert!(wire.starts_with(prefix), "{}", &wire[..60]);
+    assert_eq!(wire.len() - prefix.len(), 1_048_576_usize.div_ceil(3) * 4);
+
+    // save_blob_to_file writes the same bytes back to disk.
+    let out = std::env::temp_dir().join(format!("db2-plugin-it-{}.out", std::process::id()));
+    let mut save = key.clone();
+    save["file_path"] = json!(out.display().to_string());
+    let saved = p.call_ok("save_blob_to_file", p.schema_params(save));
+    assert_eq!(saved, Value::Null);
+    assert_eq!(std::fs::read(&out).unwrap(), bytes, "BLOB round trip");
+
+    // A file larger than the host allows is refused before it is read.
+    let resp = p.call(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1004,
+                "COL_BLOB": format!("BLOB_FILE_REF:{}:application/octet-stream:{}", bytes.len(), path.display())
+            },
+            "max_blob_size": 1024
+        })),
+    );
+    let message = resp["error"]["message"].as_str().expect("size error");
+    assert!(
+        message.contains("exceeds the maximum allowed BLOB size"),
+        "{message}"
+    );
+
+    // A row that does not exist, a NULL value and a missing key are errors.
+    let mut missing = key.clone();
+    missing["pk_map"] = json!({ "ID": 424242 });
+    let resp = p.call("fetch_blob_as_data_url", p.schema_params(missing));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("No value found"));
+    let mut keyless = key;
+    keyless["pk_map"] = json!({});
+    let resp = p.call("fetch_blob_as_data_url", p.schema_params(keyless));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Cannot identify the row"));
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&out).unwrap();
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_insert_record_delimited_names() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let cleanup = "DELETE FROM \"Mixed Case\".\"Order Details\" WHERE \"Order Id\" = 2";
+    p.query_ok(cleanup, Value::Null, 1);
+
+    let inserted = p.call_ok(
+        "insert_record",
+        p.params_in(
+            "Mixed Case",
+            json!({
+                "table": "Order Details",
+                "data": {
+                    "Order Id": 2, "Unit Price": "3.50", "select": "sel",
+                    "Qty#": "4", "O'Brien": "it's", "Größe": "klein"
+                }
+            }),
+        ),
+    );
+    assert_eq!(inserted, json!(1));
+
+    let row = p.query_ok(
+        "SELECT * FROM \"Mixed Case\".\"Order Details\" WHERE \"Order Id\" = 2",
+        json!(1),
+        1,
+    );
+    assert_eq!(row["rows"], json!([[2, "3.50", "sel", 4, "it's", "klein"]]));
+    p.query_ok(cleanup, Value::Null, 1);
+}
+
+#[test]
+fn test_insert_record_constraint_violations() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
+        Value::Null,
+        1,
+    );
+
+    let mut error = |table: &str, data: Value| -> String {
+        let resp = p.call(
+            "insert_record",
+            p.schema_params(json!({ "table": table, "data": data })),
+        );
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected an error: {resp}"))
+            .to_string()
+    };
+
+    // Rejected before reaching Db2: text where a number belongs.
+    assert_eq!(
+        error("CRUD_TEST", json!({ "ID": "abc", "NAME": "x" })),
+        "'abc' is not a valid number for column \"ID\""
+    );
+    assert_eq!(
+        error(
+            "CRUD_TEST",
+            json!({ "ID": "1; DROP TABLE TEST_SCHEMA.CRUD_TEST", "NAME": "x" })
+        ),
+        "'1; DROP TABLE TEST_SCHEMA.CRUD_TEST' is not a valid number for column \"ID\""
+    );
+
+    // NOT NULL: Db2 identifies the column by internal numbers; the message
+    // names it.
+    assert_eq!(
+        error("CRUD_TEST", json!({ "NAME": "x" })),
+        "SQL0407N Assignment of a NULL value to a NOT NULL column \"ID\" is not allowed. SQLSTATE=23502"
+    );
+    let required = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "EMAIL": "nn@example.com", "HIRE_DATE": "2024-01-01" }),
+    );
+    assert!(
+        required.contains("NOT NULL column \"LAST_NAME\""),
+        "{required}"
+    );
+
+    // Primary key.
+    let resp = p.call(
+        "insert_record",
+        p.schema_params(json!({ "table": "CRUD_TEST", "data": { "ID": 801, "NAME": "x" } })),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let mut error = |table: &str, data: Value| -> String {
+        let resp = p.call(
+            "insert_record",
+            p.schema_params(json!({ "table": table, "data": data })),
+        );
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected an error: {resp}"))
+            .to_string()
+    };
+    let duplicate = error("CRUD_TEST", json!({ "ID": 801, "NAME": "x" }));
+    assert!(duplicate.starts_with("SQL0803N"), "{duplicate}");
+    assert!(duplicate.ends_with("SQLSTATE=23505"), "{duplicate}");
+
+    // Unique index.
+    let unique = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "john.doe@example.com", "HIRE_DATE": "2024-01-01" }),
+    );
+    assert!(unique.starts_with("SQL0803N"), "{unique}");
+
+    // Foreign key: the constraint is named.
+    let foreign = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "fk@example.com", "HIRE_DATE": "2024-01-01", "DEPT_ID": 999 }),
+    );
+    assert!(foreign.starts_with("SQL0530N"), "{foreign}");
+    assert!(
+        foreign.contains("TEST_SCHEMA.EMPLOYEES.FK_EMP_DEPT"),
+        "{foreign}"
+    );
+    assert!(foreign.ends_with("SQLSTATE=23503"), "{foreign}");
+
+    // A value that does not fit, a value for a GENERATED ALWAYS column, a
+    // malformed date, an unknown column and an unknown table.
+    let long = error("CRUD_TEST", json!({ "ID": 802, "NAME": "x".repeat(200) }));
+    assert!(long.contains("SQLSTATE=22001"), "{long}");
+    let generated = error(
+        "EMPLOYEES",
+        json!({ "EMP_ID": 77, "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "id@example.com", "HIRE_DATE": "2024-01-01" }),
+    );
+    assert!(generated.starts_with("SQL0798N"), "{generated}");
+    let date = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "d@example.com", "HIRE_DATE": "not a date" }),
+    );
+    assert!(date.starts_with("SQL0180N"), "{date}");
+    let column = error("CRUD_TEST", json!({ "ID": 803, "NOPE": "x" }));
+    assert!(column.starts_with("SQL0206N \"NOPE\""), "{column}");
+    let table = error("NOPE_TABLE", json!({ "ID": 1 }));
+    assert_eq!(
+        table,
+        "SQL0204N \"TEST_SCHEMA.NOPE_TABLE\" is an undefined name. SQLSTATE=42704"
+    );
+
+    // A BLOB preview (fewer bytes than its header announces) is not written.
+    let preview = error(
+        "TYPE_METADATA_TEST",
+        json!({ "ID": 1005, "COL_BLOB": "BLOB:50000:application/octet-stream:yv66vg==" }),
+    );
+    assert!(preview.contains("preview"), "{preview}");
+
+    // Nothing was inserted by the failed attempts.
+    let count = p.query_ok(
+        "SELECT COUNT(*) FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
+        Value::Null,
+        1,
+    );
+    assert_eq!(count["rows"], json!([[1]]));
+    let employees = p.query_ok("SELECT COUNT(*) FROM TEST_SCHEMA.EMPLOYEES", Value::Null, 1);
+    assert_eq!(employees["rows"], json!([[6]]));
+
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
+        Value::Null,
+        1,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Tests — Drop operations (uses DROP_TEST table)
 // ---------------------------------------------------------------------------
 
