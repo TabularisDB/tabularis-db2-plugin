@@ -228,6 +228,18 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
                 request.u32(&["page"]).unwrap_or(1),
             ))
         }
+        "execute_query_batch" => {
+            let (session, _) = request.schema_session()?;
+            let queries = request
+                .strings("queries")
+                .ok_or_else(|| RpcError::invalid_params("Missing parameter 'queries'"))?;
+            Ok(json!(query::execute_query_batch(
+                &session,
+                &queries,
+                request.u32(&["limit", "page_size"]),
+                request.u32(&["page"]).unwrap_or(1),
+            )))
+        }
         "explain_query" => {
             let (session, _) = request.schema_session()?;
             reply(query::explain_query(
@@ -345,7 +357,24 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
     }
 }
 
+/// Makes the Db2 CLI driver exchange character data as UTF-8 (code page
+/// 1208) whatever the process locale is.
+///
+/// The driver derives its application code page from the locale. Under the
+/// `C` locale — what a container or a service usually runs with — that is a
+/// single-byte code page, and every character outside it (accented letters,
+/// CJK) reaches the plugin as a substitution character. The plugin always
+/// reads and writes UTF-8, so the code page is pinned unless the user set
+/// `DB2CODEPAGE` themselves. Must run before the first ODBC call.
+fn pin_utf8_code_page() {
+    if std::env::var_os("DB2CODEPAGE").is_none() {
+        std::env::set_var("DB2CODEPAGE", "1208");
+    }
+}
+
 fn main() {
+    pin_utf8_code_page();
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut settings = PluginSettings::default();

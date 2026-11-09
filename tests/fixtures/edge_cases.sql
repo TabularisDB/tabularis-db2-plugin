@@ -68,3 +68,35 @@ CREATE TABLE TEST_SCHEMA.TYPE_METADATA_TEST (
 );
 
 COMMENT ON COLUMN TEST_SCHEMA.TYPE_METADATA_TEST.COL_DECIMAL IS 'Amount, 4 decimals';
+
+-- One row with a value in every column, for the result-set type tests.
+INSERT INTO TEST_SCHEMA.TYPE_METADATA_TEST (
+    COL_CHAR, COL_VARCHAR, COL_BIT_DATA, COL_GRAPHIC, COL_VARGRAPHIC, COL_SMALLINT, COL_INTEGER,
+    COL_DECIMAL, COL_DECFLOAT16, COL_DECFLOAT34, COL_REAL, COL_DOUBLE, COL_BOOLEAN, COL_DATE,
+    COL_TIME, COL_TIMESTAMP, COL_TIMESTAMP12, COL_CLOB, COL_DBCLOB, COL_BLOB, COL_BINARY,
+    COL_VARBINARY, COL_XML
+) VALUES (
+    'abc', 'héllo wörld 所有', X'CAFEBABE', 'グラ', '变长', 7, -42,
+    1234.5678, 1.5, 12345678901234567890.123456789, 1.25, 75000.5, TRUE, '2024-02-29',
+    '13:45:10', '2024-02-29-13.45.10.123456', '2024-02-29-13.45.10.123456789012', 'clob text',
+    'dbclob 文本', BLOB(X'89504E470D0A1A0A0000'), BX'00112233445566778899AABBCCDDEEFF',
+    BX'DEADBEEF', '<a><b>1</b></a>'
+);
+
+-- A row of NULLs (only the identity and the NOT NULL default are set).
+INSERT INTO TEST_SCHEMA.TYPE_METADATA_TEST (COL_VARCHAR) VALUES (NULL);
+
+-- ---------------------------------------------------------
+-- Enough rows to need several grid pages (Tabularis loads 500
+-- rows per page by default).
+-- ---------------------------------------------------------
+
+CREATE TABLE TEST_SCHEMA.PAGING_TEST (
+    N INTEGER NOT NULL,
+    LABEL VARCHAR(20),
+    PRIMARY KEY (N)
+);
+
+INSERT INTO TEST_SCHEMA.PAGING_TEST (N, LABEL)
+    WITH SEQ (N) AS (VALUES 1 UNION ALL SELECT N + 1 FROM SEQ WHERE N < 1200)
+    SELECT N, 'row ' || N FROM SEQ;

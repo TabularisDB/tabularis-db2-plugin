@@ -63,7 +63,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 |---|---|---|
 | Read table data | Verified | — |
 | Schema & object browsing | Verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
-| Query execution | Not yet verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
+| Query execution | Verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
 | Insert record | Not yet verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
 | Update record | Not yet verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
 | Delete record | Not yet verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
@@ -78,7 +78,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 
 - **Connection via ODBC** — Connect to Db2 using host, port, database, credentials, and optional plugin settings.
 - **Schema & Object Browsing** — List schemas, tables, columns, views, indexes, foreign keys, and routines.
-- **Query Execution** — Run arbitrary SQL queries with pagination support.
+- **Query Execution** — Run any SQL statement, with pagination that leaves your `ORDER BY`, `FETCH FIRST` and isolation clauses alone, typed values (integers, floats, booleans, exact decimals, BLOB previews) and Db2's own error messages. Multi-statement scripts run on one connection, and `BEGIN ... END` blocks stay one statement.
 - **Inline Editing** — Insert, update, and delete rows directly from the Tabularis grid.
 - **DDL Generation** — Generate `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, and `ADD FOREIGN KEY` SQL.
 - **Modern Plugin Manifest** — Uses current Tabularis plugin manifest fields including `settings`, modern capabilities, color/icon metadata, and connection string support.
@@ -173,7 +173,8 @@ The code is intentionally split by responsibility:
 | `get_routines` | Lists routines in the selected schema |
 | `get_routine_parameters` | Returns routine parameters |
 | `get_routine_definition` | Returns the stored routine body when available |
-| `execute_query` | Runs SQL with pagination for `SELECT` / `WITH` queries |
+| `execute_query` | Runs one statement. A result set (`SELECT`, `WITH`, `VALUES`, `CALL`) is paged on the cursor and returned with typed values; anything else returns the number of rows it changed |
+| `execute_query_batch` | Runs the statements of a script in order on one connection, reporting each one's result or error |
 | `explain_query` | Returns the DB2 execution plan tree by reading explain tables |
 | `insert_record` | Inserts a row |
 | `update_record` | Updates a row by primary key column |
@@ -354,6 +355,9 @@ and publishes the release with that changelog section as its notes.
 - The plugin requires a working Db2 ODBC driver on the host system.
 - `explain_query` reads the DB2 explain tables (`SYSTOOLS.EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`, `EXPLAIN_STATEMENT`) to build a plan tree; these tables must exist (see `CALL SYSPROC.SYSINSTALLOBJECTS`). Some cost/row metrics depend on the DB2 edition and optimizer statistics being up to date.
 - Catalog queries were designed using Db2 catalog conventions and DBeaver’s Db2 extension as a reference, but they should still be validated against the specific Db2 edition/version you target.
+- Every statement is committed on its own: connections run in autocommit mode and are not kept between requests, so an explicit transaction cannot span several statements run from the editor. Wrap the statements in a `BEGIN ... END` compound statement to run them atomically.
+- A `BLOB` in a query result carries its first 10,240 bytes and its full size; `BINARY`, `VARBINARY` and `FOR BIT DATA` values are shown as hexadecimal text.
+- Paging skips rows on the cursor, so a very deep page of a very large result takes longer than the first ones. Filter or order the result to get to the rows you need.
 - `get_databases` is intentionally conservative and currently returns the active server/database identity instead of enumerating every possible database on an instance.
 
 ## [Changelog](./CHANGELOG.md)

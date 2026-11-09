@@ -108,6 +108,15 @@ pub struct QueryResult {
     pub pagination: Option<Pagination>,
 }
 
+/// One statement's outcome within `execute_query_batch`: exactly one of
+/// `result` and `error` is set.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchStatementResult {
+    pub result: Option<QueryResult>,
+    pub error: Option<String>,
+    pub execution_time_ms: Option<f64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExplainNode {
     pub id: String,
