@@ -49,6 +49,50 @@ All notable changes to this project will be documented in this file.
   notifications (requests without an `id`, such as `cancel`) are no longer
   answered.
 
+- Query execution, verified against Db2 12.1 and Tabularis 0.32.0 (#2):
+  - Integers, floating-point numbers and booleans are returned as JSON
+    numbers and booleans instead of strings. Tabularis reads `COUNT(*)` as
+    an integer, so the row count of every grid was 0. `DECIMAL` and
+    `DECFLOAT` stay text, digit for digit; a `BLOB` comes back in the host's
+    blob format with its size, MIME type and first 10,240 bytes.
+  - Whether a statement returns rows is decided by Db2, not by its first
+    keyword: `VALUES`, `CALL` with a result set and a statement that starts
+    with a comment returned nothing before.
+  - Pagination no longer rewrites the query. The statement runs as written
+    and the page is taken on the cursor, so `ORDER BY`, `FETCH FIRST n ROWS
+    ONLY`, `WITH UR` and columns that share a name all keep working, and
+    `has_more` is exact (a page that ended on the last row claimed another
+    one). Without a `limit` every row is returned.
+  - `affected_rows` is the real count for `INSERT`, `UPDATE`, `DELETE` and
+    `MERGE` (it was always 0), and 0 for DDL.
+  - An error raised while fetching (a division by zero in a row, for
+    example) is reported as the Db2 error. It used to kill the plugin
+    process, taking every open connection with it.
+  - Non-ASCII text survives a `C` locale: the plugin pins the Db2 CLI code
+    page to UTF-8 (`DB2CODEPAGE=1208`) unless it is already set. Under
+    `LANG=C` — a container, a service — accented and CJK characters were
+    replaced.
+  - Unqualified routine names resolve in the selected schema (it is added
+    to `CURRENT PATH`), like unqualified table names already did.
+  - A trailing `;` is accepted, and an empty statement is rejected with a
+    clear message.
+  - "Set to server NOW" in the data grid works: Tabularis asks for the
+    server time with `SELECT NOW()`, which Db2 rejects without a `FROM`, so
+    that exact statement is answered with `VALUES CURRENT TIMESTAMP`.
+
+### Added
+
+- `execute_query_batch`: a script's statements run in order on one
+  connection, so session state set by one statement (`SET CURRENT SCHEMA`,
+  for instance) is seen by the next. Tabularis previously fell back to one
+  connection per statement.
+- The manifest declares `sql_dialect` (`generic`) and a `sql_syntax`
+  descriptor for Db2: nested block comments, `BEGIN ... END` blocks kept as
+  one statement when a script is split, the `db2` SQL formatter, and Db2
+  keywords and functions for autocomplete. Without a declared dialect
+  Tabularis treated the driver as PostgreSQL when writing SQL of its own and
+  split compound statements at every `;`.
+
 ### Changed
 
 - Each request now uses a single Db2 connection for all of its statements

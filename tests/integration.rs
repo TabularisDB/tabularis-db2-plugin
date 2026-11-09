@@ -54,7 +54,15 @@ struct Plugin {
 
 impl Plugin {
     fn spawn() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tabularis-db2-plugin"))
+        Self::spawn_with(|_| {})
+    }
+
+    /// Spawns the plugin after letting `configure` adjust its command line or
+    /// environment.
+    fn spawn_with(configure: impl FnOnce(&mut Command)) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tabularis-db2-plugin"));
+        configure(&mut command);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -127,6 +135,22 @@ impl Plugin {
         let mut params = self.schema_params(extras);
         params["schema"] = json!(schema);
         params
+    }
+
+    /// `execute_query` in TEST_SCHEMA; `limit` may be `Value::Null`.
+    fn query(&mut self, sql: &str, limit: Value, page: u32) -> Value {
+        self.call(
+            "execute_query",
+            self.schema_params(json!({ "query": sql, "limit": limit, "page": page })),
+        )
+    }
+
+    fn query_ok(&mut self, sql: &str, limit: Value, page: u32) -> Value {
+        let resp = self.query(sql, limit, page);
+        if let Some(err) = resp.get("error") {
+            panic!("query failed: {err}\n{sql}");
+        }
+        resp["result"].clone()
     }
 
     /// Writes one raw line to the plugin without waiting for an answer.
@@ -924,62 +948,485 @@ fn test_execute_query() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "execute_query",
-        p.schema_params(json!({
-            "query": "SELECT EMP_ID, FIRST_NAME, LAST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID",
-            "limit": 10,
-            "page": 1,
-        })),
+    let result = p.query_ok(
+        "SELECT EMP_ID, FIRST_NAME, LAST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID",
+        json!(10),
+        1,
     );
 
-    let columns = result["columns"].as_array().expect("columns array");
-    assert_eq!(columns.len(), 4);
-
+    assert_eq!(
+        result["columns"],
+        json!(["EMP_ID", "FIRST_NAME", "LAST_NAME", "SALARY"])
+    );
     let rows = result["rows"].as_array().expect("rows array");
     assert_eq!(rows.len(), 6, "should return all 6 employees");
 
-    // First row should be EMP_ID=1 (John Doe)
-    assert_eq!(rows[0][1], json!("John"));
-    assert_eq!(rows[0][2], json!("Doe"));
+    // Integers are JSON numbers, text is text, and a DECIMAL keeps its
+    // digits as text.
+    assert_eq!(rows[0], json!([1, "John", "Doe", "75000.00"]));
+    assert_eq!(result["affected_rows"], json!(0));
+    assert_eq!(result["truncated"], json!(false));
+    assert_eq!(
+        result["pagination"],
+        json!({ "page": 1, "page_size": 10, "total_rows": null, "has_more": false })
+    );
+}
+
+#[test]
+fn test_execute_query_value_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let result = p.query_ok(
+        "SELECT * FROM TEST_SCHEMA.TYPE_METADATA_TEST ORDER BY ID",
+        json!(10),
+        1,
+    );
+    let columns = result["columns"].as_array().unwrap();
+    let rows = result["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let value = |row: usize, name: &str| {
+        let index = columns
+            .iter()
+            .position(|column| column == name)
+            .unwrap_or_else(|| panic!("{name} missing from {columns:?}"));
+        rows[row][index].clone()
+    };
+
+    for (name, expected) in [
+        ("ID", json!(1)),
+        ("COL_CHAR", json!("abc       ")),
+        ("COL_VARCHAR", json!("héllo wörld 所有")),
+        ("COL_BIT_DATA", json!("CAFEBABE")),
+        ("COL_GRAPHIC", json!("グラ  ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!(7)),
+        ("COL_INTEGER", json!(-42)),
+        ("COL_DECIMAL", json!("1234.5678")),
+        ("COL_DECFLOAT16", json!("1.5")),
+        ("COL_DECFLOAT34", json!("12345678901234567890.123456789")),
+        ("COL_REAL", json!(1.25)),
+        ("COL_DOUBLE", json!(75000.5)),
+        ("COL_BOOLEAN", json!(true)),
+        ("COL_DATE", json!("2024-02-29")),
+        ("COL_TIME", json!("13:45:10")),
+        ("COL_TIMESTAMP", json!("2024-02-29 13:45:10.123456")),
+        ("COL_TIMESTAMP12", json!("2024-02-29 13:45:10.123456789012")),
+        ("COL_CLOB", json!("clob text")),
+        ("COL_DBCLOB", json!("dbclob 文本")),
+        // 10 bytes that start with the PNG signature, in the host's blob
+        // wire format.
+        ("COL_BLOB", json!("BLOB:10:image/png:iVBORw0KGgoAAA==")),
+        ("COL_BINARY", json!("00112233445566778899AABBCCDDEEFF")),
+        ("COL_VARBINARY", json!("DEADBEEF")),
+        ("COL_COMPUTED", json!(20)),
+    ] {
+        assert_eq!(value(0, name), expected, "{name}");
+    }
+    let xml = value(0, "COL_XML");
+    assert!(xml.as_str().unwrap().ends_with("<a><b>1</b></a>"), "{xml}");
+
+    // The implicitly hidden column is not part of SELECT *.
+    assert!(!columns.contains(&json!("COL_HIDDEN")));
+
+    // SQL NULL is JSON null whatever the column type.
+    for name in [
+        "COL_VARCHAR",
+        "COL_INTEGER",
+        "COL_DOUBLE",
+        "COL_TIME",
+        "COL_TIMESTAMP12",
+        "COL_CLOB",
+        "COL_BLOB",
+        "COL_VARBINARY",
+        "COL_XML",
+        "COL_COMPUTED",
+    ] {
+        assert_eq!(value(1, name), Value::Null, "{name}");
+    }
+    // Columns with a default got it instead.
+    assert_eq!(value(1, "COL_BOOLEAN"), json!(false));
+    assert_eq!(value(1, "COL_DECIMAL"), json!("0.0000"));
+    assert_eq!(value(1, "COL_SMALLINT"), json!(1));
+}
+
+#[test]
+fn test_unicode_survives_the_c_locale() {
+    require_db2!();
+    // What a container or a service runs with. The Db2 CLI driver would pick
+    // a single-byte code page from it and replace every other character.
+    let mut p = Plugin::spawn_with(|command| {
+        command
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env_remove("DB2CODEPAGE");
+    });
+
+    let result = p.query_ok(
+        "SELECT COL_VARCHAR, COL_VARGRAPHIC, COL_DBCLOB FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = 1",
+        json!(1),
+        1,
+    );
+    assert_eq!(
+        result["rows"],
+        json!([["héllo wörld 所有", "变长", "dbclob 文本"]])
+    );
+
+    // Non-ASCII text in the statement itself, and in the catalog.
+    let echo = p.query_ok("VALUES 'Größe ✓ 所有员工'", json!(1), 1);
+    assert_eq!(echo["rows"], json!([["Größe ✓ 所有员工"]]));
+
+    let tables = p.call_ok("get_tables", p.schema_params(json!({})));
+    let employees = tables
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|table| table["name"] == "EMPLOYEES")
+        .expect("EMPLOYEES table missing");
+    assert_eq!(employees["comment"], json!(TABLE_COMMENT));
+
+    let columns = p.call_ok(
+        "get_columns",
+        p.params_in("Mixed Case", json!({ "table": "Order Details" })),
+    );
+    assert_eq!(columns[5]["name"], json!("Größe"));
+}
+
+#[test]
+fn test_execute_query_large_blob_is_previewed() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // 50,000 bytes: more than the preview carries. The header reports the
+    // true size; the payload is the first 10,240 bytes.
+    let result = p.query_ok(
+        "SELECT BLOB(REPEAT('A', 30000)) || BLOB(REPEAT('B', 20000)) AS BIG FROM SYSIBM.SYSDUMMY1",
+        json!(1),
+        1,
+    );
+    let wire = result["rows"][0][0].as_str().expect("blob wire format");
+    let prefix = "BLOB:50000:application/octet-stream:";
+    assert!(wire.starts_with(prefix), "{}", &wire[..60]);
+    let payload = &wire[prefix.len()..];
+    assert_eq!(payload.len(), 10_240_usize.div_ceil(3) * 4);
+}
+
+#[test]
+fn test_execute_query_statement_kinds() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Whether a statement returns rows is decided by Db2, not by its first
+    // keyword.
+    let values = p.query_ok("VALUES (1, 'a'), (2, 'b')", json!(10), 1);
+    assert_eq!(values["rows"], json!([[1, "a"], [2, "b"]]));
+
+    let call = p.query_ok("CALL TEST_SCHEMA.GET_EMPLOYEES_BY_DEPT(1)", json!(10), 1);
+    assert_eq!(call["columns"][0], json!("EMP_ID"));
+    assert_eq!(call["rows"].as_array().unwrap().len(), 3);
+
+    let commented = p.query_ok(
+        "-- how many?\nSELECT COUNT(*) AS N FROM TEST_SCHEMA.EMPLOYEES;\n",
+        json!(10),
+        1,
+    );
+    assert_eq!(commented["rows"], json!([[6]]));
+
+    // Unqualified names resolve in the selected schema: tables through
+    // CURRENT SCHEMA, routines through CURRENT PATH.
+    let unqualified = p.query_ok(
+        "SELECT FULL_NAME(FIRST_NAME, LAST_NAME) FROM EMPLOYEES WHERE EMP_ID = 1",
+        json!(10),
+        1,
+    );
+    assert_eq!(unqualified["rows"], json!([["John Doe"]]));
+
+    // Columns that share a name are both returned.
+    let duplicates = p.query_ok(
+        "SELECT E.DEPT_ID, D.DEPT_ID FROM EMPLOYEES E JOIN DEPARTMENTS D ON E.DEPT_ID = D.DEPT_ID WHERE E.EMP_ID = 3",
+        json!(10),
+        1,
+    );
+    assert_eq!(duplicates["columns"], json!(["DEPT_ID", "DEPT_ID"]));
+    assert_eq!(duplicates["rows"], json!([[2, 2]]));
+
+    // What Tabularis runs to count the rows of a grid query: the count must
+    // be a JSON integer, and no limit means no pagination block.
+    let count = p.query_ok(
+        "SELECT COUNT(*) FROM (SELECT * FROM \"TEST_SCHEMA\".\"EMPLOYEES\") as count_wrapper",
+        Value::Null,
+        1,
+    );
+    assert_eq!(count["rows"][0][0].as_i64(), Some(6));
+    assert_eq!(count["pagination"], Value::Null);
+}
+
+#[test]
+fn test_execute_query_affected_rows() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    p.query_ok(
+        "DELETE FROM CRUD_TEST WHERE ID BETWEEN 700 AND 799",
+        Value::Null,
+        1,
+    );
+
+    let insert = p.query_ok(
+        "INSERT INTO CRUD_TEST (ID, NAME, VALUE) VALUES (701, 'a', 1.5), (702, 'b', 2.5), (703, 'c', 3.5)",
+        json!(100),
+        1,
+    );
+    assert_eq!(insert["affected_rows"], json!(3));
+    assert_eq!(insert["columns"], json!([]));
+    assert_eq!(insert["rows"], json!([]));
+    assert_eq!(insert["pagination"], Value::Null);
+
+    let update = p.query_ok(
+        "UPDATE CRUD_TEST SET NAME = 'z' WHERE ID IN (701, 702)",
+        json!(100),
+        1,
+    );
+    assert_eq!(update["affected_rows"], json!(2));
+
+    // A statement that matches nothing succeeds with a count of 0.
+    let nothing = p.query_ok(
+        "UPDATE CRUD_TEST SET NAME = 'z' WHERE ID = -1",
+        json!(100),
+        1,
+    );
+    assert_eq!(nothing["affected_rows"], json!(0));
+
+    let delete = p.query_ok(
+        "DELETE FROM CRUD_TEST WHERE ID BETWEEN 700 AND 799",
+        json!(100),
+        1,
+    );
+    assert_eq!(delete["affected_rows"], json!(3));
+
+    // DDL and compound statements report no rows rather than a bogus count.
+    let create = p.query_ok(
+        "CREATE TABLE TEST_SCHEMA.TMP_AFFECTED (A INT)",
+        json!(100),
+        1,
+    );
+    assert_eq!(create["affected_rows"], json!(0));
+    let compound = p.query_ok(
+        "BEGIN DECLARE X INT; SET X = 1; INSERT INTO TEST_SCHEMA.TMP_AFFECTED VALUES (X); END;",
+        json!(100),
+        1,
+    );
+    assert_eq!(compound["affected_rows"], json!(0));
+    let kept = p.query_ok("SELECT A FROM TEST_SCHEMA.TMP_AFFECTED", json!(100), 1);
+    assert_eq!(
+        kept["rows"],
+        json!([[1]]),
+        "the compound statement ran as one"
+    );
+    p.query_ok("DROP TABLE TEST_SCHEMA.TMP_AFFECTED", json!(100), 1);
+}
+
+#[test]
+fn test_execute_query_batch() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    p.query("DROP TABLE TEST_SCHEMA.BATCH_TMP", Value::Null, 1);
+
+    let results = p.call_ok(
+        "execute_query_batch",
+        p.schema_params(json!({
+            "queries": [
+                "CREATE TABLE BATCH_TMP (N INTEGER)",
+                "INSERT INTO BATCH_TMP VALUES (1), (2), (3)",
+                "SELEC broken",
+                "SELECT N FROM BATCH_TMP ORDER BY N",
+                // A compound statement is one statement.
+                "BEGIN DECLARE V INTEGER; SET V = 10; UPDATE BATCH_TMP SET N = N + V; END",
+                "SELECT SUM(N) AS TOTAL FROM BATCH_TMP;",
+                // Session state: it only reaches the next statement if the
+                // whole script runs on one connection.
+                "SET CURRENT SCHEMA = 'EMPTY_SCHEMA'",
+                "VALUES CURRENT SCHEMA",
+                "DROP TABLE TEST_SCHEMA.BATCH_TMP",
+            ],
+            "limit": 2,
+            "page": 1,
+        })),
+    );
+    let results = results.as_array().expect("one entry per statement");
+    assert_eq!(results.len(), 9);
+
+    for (index, entry) in results.iter().enumerate() {
+        assert!(entry["execution_time_ms"].is_number(), "statement {index}");
+        assert_ne!(
+            entry["result"].is_null(),
+            entry["error"].is_null(),
+            "exactly one of result and error: {entry}"
+        );
+    }
+
+    assert_eq!(results[0]["result"]["affected_rows"], json!(0));
+    assert_eq!(results[1]["result"]["affected_rows"], json!(3));
+
+    // The failing statement reports its error and the script carries on.
+    let error = results[2]["error"].as_str().expect("error text");
+    assert!(error.starts_with("SQL0104N"), "{error}");
+
+    // Paged like a single query: two of the three rows, more to come.
+    assert_eq!(results[3]["result"]["rows"], json!([[1], [2]]));
+    assert_eq!(results[3]["result"]["pagination"]["has_more"], json!(true));
+
+    assert_eq!(results[4]["result"]["affected_rows"], json!(0));
+    assert_eq!(results[5]["result"]["rows"], json!([[36]]));
+
+    assert_eq!(results[7]["result"]["rows"], json!([["EMPTY_SCHEMA"]]));
+    assert!(results[8]["error"].is_null(), "{}", results[8]);
+
+    // An empty script is an empty list; `queries` itself is required.
+    let empty = p.call_ok(
+        "execute_query_batch",
+        p.schema_params(json!({ "queries": [], "limit": 10, "page": 1 })),
+    );
+    assert_eq!(empty, json!([]));
+    let resp = p.call("execute_query_batch", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+}
+
+#[test]
+fn test_server_time_probe() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The statement Tabularis sends for "Set to server NOW".
+    let now = p.query_ok("SELECT NOW()", json!(1), 1);
+    let value = now["rows"][0][0].as_str().expect("timestamp text");
+    assert_eq!(value.len(), "2026-01-01 00:00:00.000000".len(), "{value}");
+    assert_eq!(&value[4..5], "-");
+    assert_eq!(&value[10..11], " ");
+}
+
+#[test]
+fn test_execute_query_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let message = |resp: &Value| {
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected an error: {resp}"))
+            .to_string()
+    };
+
+    // Invalid SQL: the Db2 message with its SQLSTATE, nothing else.
+    let syntax = message(&p.query("SELEC * FROM EMPLOYEES", json!(10), 1));
+    assert!(
+        syntax.starts_with("SQL0104N An unexpected token \"SELEC\""),
+        "{syntax}"
+    );
+    assert!(syntax.ends_with("SQLSTATE=42601"), "{syntax}");
+
+    let missing = message(&p.query("SELECT * FROM NOPE", json!(10), 1));
+    assert_eq!(
+        missing,
+        "SQL0204N \"TEST_SCHEMA.NOPE\" is an undefined name. SQLSTATE=42704"
+    );
+
+    let column = message(&p.query("SELECT NOPE FROM EMPLOYEES", json!(10), 1));
+    assert!(
+        column.starts_with("SQL0206N \"NOPE\" is not valid"),
+        "{column}"
+    );
+
+    let duplicate = message(&p.query(
+        "INSERT INTO EMP_PROJECTS (EMP_ID, PROJECT_ID) VALUES (1, 1)",
+        json!(10),
+        1,
+    ));
+    assert!(duplicate.starts_with("SQL0803N"), "{duplicate}");
+    assert!(duplicate.contains("SQLSTATE=23505"), "{duplicate}");
+
+    let division = message(&p.query("SELECT 1 / (EMP_ID - EMP_ID) FROM EMPLOYEES", json!(10), 1));
+    assert!(division.contains("SQLSTATE=22012"), "{division}");
+
+    assert_eq!(
+        message(&p.query("  ;  ", json!(10), 1)),
+        "The query is empty"
+    );
+
+    // The plugin keeps answering after an error.
+    let after = p.query_ok("VALUES 1", json!(10), 1);
+    assert_eq!(after["rows"], json!([[1]]));
 }
 
 #[test]
 fn test_execute_query_pagination() {
     require_db2!();
     let mut p = Plugin::spawn();
+    let sql = "SELECT EMP_ID FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID";
+    let ids = |result: &Value| -> Vec<i64> {
+        result["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row[0].as_i64().unwrap())
+            .collect()
+    };
 
-    // Page 1 with limit 3
-    let page1 = p.call_ok(
-        "execute_query",
-        p.schema_params(json!({
-            "query": "SELECT EMP_ID FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID",
-            "limit": 3,
-            "page": 1,
-        })),
-    );
-    let rows1 = page1["rows"].as_array().unwrap();
-    assert_eq!(rows1.len(), 3, "page 1 should have 3 rows");
+    // Six employees in pages of four.
+    let page1 = p.query_ok(sql, json!(4), 1);
+    assert_eq!(ids(&page1), [1, 2, 3, 4]);
     assert_eq!(
-        page1["pagination"]["has_more"],
-        json!(true),
-        "should have more pages"
+        page1["pagination"],
+        json!({ "page": 1, "page_size": 4, "total_rows": null, "has_more": true })
     );
+    assert_eq!(page1["truncated"], json!(true));
 
-    // Page 2 with limit 3
-    let page2 = p.call_ok(
-        "execute_query",
-        p.schema_params(json!({
-            "query": "SELECT EMP_ID FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID",
-            "limit": 3,
-            "page": 2,
-        })),
-    );
-    let rows2 = page2["rows"].as_array().unwrap();
-    assert_eq!(rows2.len(), 3, "page 2 should have 3 rows");
+    let page2 = p.query_ok(sql, json!(4), 2);
+    assert_eq!(ids(&page2), [5, 6]);
+    assert_eq!(page2["pagination"]["has_more"], json!(false));
+    assert_eq!(page2["truncated"], json!(false));
 
-    // Pages should not overlap
-    assert_ne!(rows1[0], rows2[0], "pages should return different data");
+    // A page past the end is empty, with the columns still described.
+    let page3 = p.query_ok(sql, json!(4), 3);
+    assert_eq!(ids(&page3), Vec::<i64>::new());
+    assert_eq!(page3["columns"], json!(["EMP_ID"]));
+    assert_eq!(page3["pagination"]["has_more"], json!(false));
+
+    // A page that ends exactly on the last row does not claim more.
+    let exact = p.query_ok(sql, json!(6), 1);
+    assert_eq!(ids(&exact), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(exact["pagination"]["has_more"], json!(false));
+    let halves = p.query_ok(sql, json!(3), 2);
+    assert_eq!(ids(&halves), [4, 5, 6]);
+    assert_eq!(halves["pagination"]["has_more"], json!(false));
+
+    // Every row is returned exactly once across the pages.
+    let mut seen = Vec::new();
+    for page in 1..=6 {
+        seen.extend(ids(&p.query_ok(sql, json!(1), page)));
+    }
+    assert_eq!(seen, [1, 2, 3, 4, 5, 6]);
+
+    // Page 0 is the first page.
+    assert_eq!(ids(&p.query_ok(sql, json!(2), 0)), [1, 2]);
+
+    // Without a limit everything comes back and there is no pagination.
+    let all = p.query_ok(sql, Value::Null, 1);
+    assert_eq!(ids(&all), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(all["pagination"], Value::Null);
+
+    // The statement runs as written: its own row limit and isolation clause
+    // stay in force, and paging applies to what it returns.
+    let limited = "SELECT EMP_ID FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID DESC FETCH FIRST 3 ROWS ONLY WITH UR";
+    assert_eq!(ids(&p.query_ok(limited, json!(2), 1)), [6, 5]);
+    let rest = p.query_ok(limited, json!(2), 2);
+    assert_eq!(ids(&rest), [4]);
+    assert_eq!(rest["pagination"]["has_more"], json!(false));
+
+    // Paging works for statements that are not a SELECT, too.
+    let values = p.query_ok("VALUES 1, 2, 3, 4, 5", json!(2), 2);
+    assert_eq!(ids(&values), [3, 4]);
+    assert_eq!(values["pagination"]["has_more"], json!(true));
 }
 
 #[test]
@@ -987,16 +1434,13 @@ fn test_execute_query_with_cte() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "execute_query",
-        p.schema_params(json!({
-            "query": "WITH dept_counts AS (SELECT DEPT_ID, COUNT(*) AS cnt FROM TEST_SCHEMA.EMPLOYEES GROUP BY DEPT_ID) SELECT * FROM dept_counts ORDER BY cnt DESC",
-            "limit": 10,
-            "page": 1,
-        })),
+    let result = p.query_ok(
+        "WITH dept_counts AS (SELECT DEPT_ID, COUNT(*) AS cnt FROM TEST_SCHEMA.EMPLOYEES GROUP BY DEPT_ID) SELECT * FROM dept_counts ORDER BY DEPT_ID",
+        json!(10),
+        1,
     );
-    let rows = result["rows"].as_array().unwrap();
-    assert!(!rows.is_empty(), "CTE query should return results");
+    assert_eq!(result["columns"], json!(["DEPT_ID", "CNT"]));
+    assert_eq!(result["rows"], json!([[1, 3], [2, 1], [3, 1], [4, 1]]));
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,10 +1662,7 @@ fn test_crud_insert_update_delete() {
             "page": 1
         })),
     );
-    let rows = qr["rows"].as_array().unwrap();
-    // COUNT returns 0
-    let count = rows[0][0].as_str().unwrap_or("0");
-    assert_eq!(count, "0", "row should be deleted");
+    assert_eq!(qr["rows"], json!([[0]]), "row should be deleted");
 }
 
 // ---------------------------------------------------------------------------

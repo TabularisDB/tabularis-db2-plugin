@@ -61,6 +61,15 @@ recreating the container.
   `SQLFetch`/`SQLGetData` calls: the IBM clidriver writes only 32-bit length
   indicators on 64-bit platforms, which `odbc-api`'s own buffers misread.
   Keep new fetch code on that path.
+- `Session::run` is the one way to run user SQL: it lets Db2 say whether
+  the statement returned a result set, pages on the cursor (never by
+  rewriting the SQL) and reads row counts and column types through raw ODBC
+  calls, again because of the 32-bit values the driver writes. Do not call
+  `odbc-api`'s `col_data_type` or `row_count`, and do not let a cursor drop:
+  `release_cursor` exists because closing a cursor Db2 already closed
+  panics.
+- Result values are typed by `utils::values::cell_to_json` from the column's
+  `ColumnKind`. `DECIMAL`/`DECFLOAT` stay text on purpose (no digit lost).
 - ODBC errors reach the user through `error::odbc_error`, which keeps the
   Db2 message and drops the ODBC call name and driver tags.
 - Pure helpers (identifier quoting, literals, pagination math, type
