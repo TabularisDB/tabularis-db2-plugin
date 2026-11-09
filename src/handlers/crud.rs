@@ -226,24 +226,51 @@ pub fn save_blob_to_file(
         .map_err(|error| format!("Failed to write {file_path}: {error}"))
 }
 
+/// Sets one column of one row and returns the number of rows changed (1).
+///
+/// The row is found from the key values in `pk_map`: the primary key, or,
+/// for a table without one, every column of the row as the grid loaded it.
+/// The update goes through `UPDATE (SELECT ... FETCH FIRST 1 ROW ONLY)`, so
+/// when a keyless table holds identical rows only one of them changes, as
+/// the user edited one row. A key that matches nothing is an error rather
+/// than a silent no-op: the row was changed or deleted since it was loaded.
 pub fn update_record(
     session: &Session,
     table: &str,
-    pk_col: &str,
-    pk_val: &Value,
-    col_name: &str,
-    new_val: &Value,
-    schema: Option<&str>,
+    pk_map: &HashMap<String, Value>,
+    column: &str,
+    new_value: &Value,
+    schema: &str,
+    max_blob_size: u64,
 ) -> PluginResult<u64> {
+    let specs = column_specs(session, schema, table)?;
+    let target = quote_qualified_name(Some(schema), table);
+
+    // The fullselect is written before the SET clause, so its parameters
+    // come first.
+    let mut params: Vec<Param> = Vec::new();
+    let condition = row_condition(&specs, pk_map, &target, &mut params)?;
+    let value =
+        bind_value(new_value, spec_of(&specs, column), true, max_blob_size)?.into_sql(&mut params);
+
     let sql = format!(
-        "UPDATE {} SET {} = {} WHERE {} = {}",
-        quote_qualified_name(schema, table),
-        quote_identifier(col_name),
-        json_to_sql_literal(new_val),
-        quote_identifier(pk_col),
-        json_to_sql_literal(pk_val)
+        "UPDATE (SELECT * FROM {target} WHERE {condition} FETCH FIRST 1 ROW ONLY) SET {} = {value}",
+        quote_identifier(column)
     );
-    session.execute(&sql)
+    let affected = session
+        .execute_with(&sql, &params)
+        .map_err(|error| name_not_null_column(error, &specs))?;
+    if affected == 0 {
+        return Err(row_not_found(&target));
+    }
+    Ok(affected)
+}
+
+fn row_not_found(target: &str) -> String {
+    format!(
+        "No row in {target} matches the key values: it was changed or deleted after it was \
+         loaded. Refresh the table and try again."
+    )
 }
 
 pub fn delete_record(

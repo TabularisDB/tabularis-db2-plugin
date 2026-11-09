@@ -65,7 +65,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Schema & object browsing | Verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
 | Query execution | Verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
 | Insert record | Verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
-| Update record | Not yet verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
+| Update record | Verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
 | Delete record | Not yet verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
 | DDL generation | Not yet verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
 | View support | Not yet verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
@@ -79,7 +79,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 - **Connection via ODBC** — Connect to Db2 using host, port, database, credentials, and optional plugin settings.
 - **Schema & Object Browsing** — List schemas, tables, columns, views, indexes, foreign keys, and routines.
 - **Query Execution** — Run any SQL statement, with pagination that leaves your `ORDER BY`, `FETCH FIRST` and isolation clauses alone, typed values (integers, floats, booleans, exact decimals, BLOB previews) and Db2's own error messages. Multi-statement scripts run on one connection, and `BEGIN ... END` blocks stay one statement.
-- **Inline Editing** — Insert, update, and delete rows directly from the Tabularis grid.
+- **Inline Editing** — Insert, update, and delete rows directly from the Tabularis grid, including tables without a primary key: the row is matched on all its columns and exactly one row is changed.
 - **DDL Generation** — Generate `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, and `ADD FOREIGN KEY` SQL.
 - **Modern Plugin Manifest** — Uses current Tabularis plugin manifest fields including `settings`, modern capabilities, color/icon metadata, and connection string support.
 - **Modular Rust Codebase** — RPC, client creation, metadata handlers, CRUD, DDL, and utilities are split into dedicated modules with unit tests.
@@ -178,7 +178,7 @@ The code is intentionally split by responsibility:
 | `explain_query` | Returns the DB2 execution plan tree by reading explain tables |
 | `insert_record` | Inserts a row, rendering each value for its column type (numbers validated, text and binary data bound as parameters, `NULL`, column defaults, BLOB uploads) |
 | `fetch_blob_as_data_url` / `save_blob_to_file` | Read the whole value of a binary column for the preview and for export |
-| `update_record` | Updates a row by primary key column |
+| `update_record` | Sets one column of one row, found by its primary key (single or composite) or, for a table without one, by the values of all its columns |
 | `delete_record` | Deletes a row by primary key column |
 | `get_schema_snapshot` | Returns all tables with columns and foreign keys |
 | `get_all_columns_batch` | Returns all column metadata for a schema |

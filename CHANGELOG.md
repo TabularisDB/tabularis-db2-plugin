@@ -100,6 +100,25 @@ All notable changes to this project will be documented in this file.
   - A `NOT NULL` violation names the column: Db2 reports it as
     `"TBSPACEID=2, TABLEID=9, COLNO=0"`.
 
+- Updating records, verified against Db2 12.1 and Tabularis 0.32.0 (#4):
+  - `update_record` reads the row's key from `pk_map`, which is what
+    Tabularis has sent since 0.13.4. The plugin still read the older
+    `pk_col` / `pk_val` pair, found nothing and generated
+    `UPDATE ... WHERE "" = ...` (`SQL0104N`), so no cell could be edited.
+    The old pair is still accepted.
+  - Composite primary keys work: every key column is part of the match.
+  - Tables without a primary key can be edited. Tabularis sends every
+    column of the row; `NULL`s are matched with `IS NULL`, LOB and XML
+    columns (which Db2 cannot compare) are left out, and when several rows
+    are identical exactly one of them is updated.
+  - With no key values at all the request fails with `Cannot identify the
+    row in "S"."T"` instead of running invalid SQL, and a key that matches
+    no row reports that the row was changed or deleted instead of doing
+    nothing silently.
+  - The new value is written for its column type like an inserted one
+    (numbers validated, text and BLOBs bound, `NULL`, `DEFAULT`), and the
+    number of rows changed is returned.
+
 ### Added
 
 - `fetch_blob_as_data_url` and `save_blob_to_file`: the whole value of a
