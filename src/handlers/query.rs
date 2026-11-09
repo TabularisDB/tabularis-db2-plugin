@@ -1,29 +1,20 @@
-use crate::client::{execute_statement, query_text_rows};
+use crate::client::Session;
 use crate::error::PluginResult;
-use crate::models::{
-    ConnectionParams, ExplainNode, ExplainPlan, Pagination, PluginSettings, QueryResult,
-};
+use crate::models::{ExplainNode, ExplainPlan, Pagination, QueryResult};
 use crate::utils::pagination::page_offset;
 use crate::utils::values::text_row_to_json;
 use std::collections::HashMap;
 
-pub fn test_connection(params: &ConnectionParams, settings: &PluginSettings) -> PluginResult<()> {
-    let _ = query_text_rows(
-        params,
-        settings,
-        None,
-        "SELECT CURRENT TIMESTAMP FROM SYSIBM.SYSDUMMY1 WITH UR",
-    )?;
+pub fn test_connection(session: &Session) -> PluginResult<()> {
+    session.query("SELECT CURRENT TIMESTAMP FROM SYSIBM.SYSDUMMY1 WITH UR")?;
     Ok(())
 }
 
 pub fn execute_query(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
+    session: &Session,
     query: &str,
     limit: Option<u32>,
     page: u32,
-    schema: Option<&str>,
 ) -> PluginResult<QueryResult> {
     let trimmed = query.trim();
     let is_select_like = trimmed
@@ -35,7 +26,7 @@ pub fn execute_query(
         || trimmed.to_uppercase().starts_with("WITH");
 
     if !is_select_like {
-        let affected_rows = execute_statement(params, settings, schema, query)?;
+        let affected_rows = session.execute(query)?;
         return Ok(QueryResult {
             columns: vec![],
             rows: vec![],
@@ -52,7 +43,7 @@ pub fn execute_query(
         page_offset(page, page_size),
         page_size
     );
-    let result = query_text_rows(params, settings, schema, &paged_sql)?;
+    let result = session.query(&paged_sql)?;
     let rows = result
         .rows
         .iter()
@@ -78,13 +69,7 @@ pub fn execute_query(
     })
 }
 
-pub fn explain_query(
-    params: &ConnectionParams,
-    settings: &PluginSettings,
-    query: &str,
-    analyze: bool,
-    schema: Option<&str>,
-) -> PluginResult<ExplainPlan> {
+pub fn explain_query(session: &Session, query: &str, analyze: bool) -> PluginResult<ExplainPlan> {
     let prefix = if analyze {
         "EXPLAIN ALL FOR"
     } else {
@@ -94,15 +79,11 @@ pub fn explain_query(
 
     // Try to run the EXPLAIN statement. If it fails because the explain tables
     // don't exist (SQL0219N / SQLSTATE 42704), create them automatically and retry.
-    if let Err(err) = execute_statement(params, settings, schema, &sql) {
+    if let Err(err) = session.execute(&sql) {
         if err.contains("SQL0219N") || err.contains("42704") || err.contains("EXPLAIN_INSTANCE") {
-            let _ = execute_statement(
-                params,
-                settings,
-                schema,
-                "CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', CAST(NULL AS VARCHAR(128)), CAST(NULL AS VARCHAR(128)))",
+            let _ = session.execute("CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', CAST(NULL AS VARCHAR(128)), CAST(NULL AS VARCHAR(128)))",
             )?;
-            let _ = execute_statement(params, settings, schema, &sql)?;
+            let _ = session.execute(&sql)?;
         } else {
             return Err(err);
         }
@@ -110,12 +91,8 @@ pub fn explain_query(
 
     // Retrieve the explain_time of the most recent explain snapshot so we can
     // scope all subsequent queries to exactly this execution.
-    let ts_result = query_text_rows(
-        params,
-        settings,
-        schema,
-        "SELECT VARCHAR(MAX(EXPLAIN_TIME)) AS TS FROM SYSTOOLS.EXPLAIN_INSTANCE",
-    )?;
+    let ts_result =
+        session.query("SELECT VARCHAR(MAX(EXPLAIN_TIME)) AS TS FROM SYSTOOLS.EXPLAIN_INSTANCE")?;
     let explain_ts = ts_result
         .rows
         .first()
@@ -127,17 +104,12 @@ pub fn explain_query(
     }
 
     // ---- statement-level costs ----
-    let stmt_result = query_text_rows(
-        params,
-        settings,
-        schema,
-        &format!(
-            "SELECT TOTAL_COST, STATEMENT_TEXT \
+    let stmt_result = session.query(&format!(
+        "SELECT TOTAL_COST, STATEMENT_TEXT \
              FROM SYSTOOLS.EXPLAIN_STATEMENT \
              WHERE EXPLAIN_TIME = '{explain_ts}' \
              FETCH FIRST 1 ROWS ONLY"
-        ),
-    )?;
+    ))?;
     let stmt_cost = stmt_result
         .rows
         .first()
@@ -145,31 +117,21 @@ pub fn explain_query(
         .and_then(|v| v.parse::<f64>().ok());
 
     // ---- operators ----
-    let ops_result = query_text_rows(
-        params,
-        settings,
-        schema,
-        &format!(
-            "SELECT OPERATOR_ID, OPERATOR_TYPE, TOTAL_COST, IO_COST, CPU_COST, \
+    let ops_result = session.query(&format!(
+        "SELECT OPERATOR_ID, OPERATOR_TYPE, TOTAL_COST, IO_COST, CPU_COST, \
                     FIRST_ROW_COST, RE_TOTAL_COST, BUFFERS \
              FROM SYSTOOLS.EXPLAIN_OPERATOR \
              WHERE EXPLAIN_TIME = '{explain_ts}' \
              ORDER BY OPERATOR_ID"
-        ),
-    )?;
+    ))?;
 
     // ---- streams (edges between operators) ----
-    let streams_result = query_text_rows(
-        params,
-        settings,
-        schema,
-        &format!(
-            "SELECT SOURCE_ID, TARGET_ID, STREAM_COUNT, COLUMN_COUNT \
+    let streams_result = session.query(&format!(
+        "SELECT SOURCE_ID, TARGET_ID, STREAM_COUNT, COLUMN_COUNT \
              FROM SYSTOOLS.EXPLAIN_STREAM \
              WHERE EXPLAIN_TIME = '{explain_ts}' \
              ORDER BY TARGET_ID, SOURCE_ID"
-        ),
-    )?;
+    ))?;
 
     // Build operator nodes keyed by ID.
     let mut nodes: HashMap<String, ExplainNode> = HashMap::new();

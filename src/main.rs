@@ -5,47 +5,344 @@ mod models;
 mod rpc;
 mod utils;
 
+use client::Session;
+use error::PluginResult;
 use handlers::{crud, ddl, metadata, query};
 use models::{ColumnDefinition, ConnectionParams, PluginSettings};
+use rpc::{RpcError, RpcResult};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead};
 
-fn schema_param(
-    params: &Value,
-    request_params: &ConnectionParams,
-    settings: &PluginSettings,
-) -> String {
-    params
-        .get("schema")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            settings
-                .current_schema
-                .clone()
+/// The arguments of one JSON-RPC request, with the plugin settings needed to
+/// act on them.
+struct Request<'a> {
+    params: &'a Value,
+    settings: &'a PluginSettings,
+}
+
+impl Request<'_> {
+    /// First non-empty string among `keys`. Tabularis sends `view_name`,
+    /// `routine_name` and `fk_name`; its plugin guide documents `view`,
+    /// `routine` and `constraint_name`. Both spellings are accepted.
+    fn text(&self, keys: &[&str]) -> Option<&str> {
+        keys.iter().find_map(|key| {
+            self.params
+                .get(key)
+                .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
         })
-        .unwrap_or_else(|| {
-            request_params
-                .username
-                .clone()
-                .unwrap_or_else(|| "DB2INST1".to_string())
-        })
-}
-
-fn parse_connection_params(params: &Value) -> Result<ConnectionParams, String> {
-    let parsed: ConnectionParams =
-        serde_json::from_value(params.clone()).map_err(|error| error.to_string())?;
-    if parsed.driver != "db2" {
-        return Err(format!("Unsupported driver '{}'", parsed.driver));
     }
-    Ok(parsed)
+
+    fn required(&self, keys: &[&str]) -> Result<&str, RpcError> {
+        self.text(keys)
+            .ok_or_else(|| RpcError::invalid_params(format!("Missing parameter '{}'", keys[0])))
+    }
+
+    fn connection(&self) -> Result<ConnectionParams, RpcError> {
+        let raw = self.params.get("params").unwrap_or(&Value::Null);
+        let parsed: ConnectionParams = serde_json::from_value(raw.clone())
+            .map_err(|error| RpcError::invalid_params(format!("Invalid connection: {error}")))?;
+        if parsed.driver != "db2" {
+            return Err(RpcError::invalid_params(format!(
+                "Unsupported driver '{}'",
+                parsed.driver
+            )));
+        }
+        Ok(parsed)
+    }
+
+    /// The schema a request works in: the one Tabularis selected, else the
+    /// plugin's "Default Schema" setting, else the user's own schema (Db2
+    /// names it after the authorization ID, in upper case).
+    fn schema(&self, connection: &ConnectionParams) -> String {
+        self.text(&["schema"])
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.settings
+                    .current_schema
+                    .clone()
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| {
+                connection
+                    .username
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_uppercase()
+            })
+    }
+
+    /// Opens the connection for this request, without selecting a schema.
+    fn session(&self) -> Result<Session, RpcError> {
+        let connection = self.connection()?;
+        Session::open(&connection, self.settings, None).map_err(RpcError::database)
+    }
+
+    /// Opens the connection for this request with its schema as the current
+    /// schema, and returns that schema for the catalog queries.
+    fn schema_session(&self) -> Result<(Session, String), RpcError> {
+        let connection = self.connection()?;
+        let schema = self.schema(&connection);
+        let session =
+            Session::open(&connection, self.settings, Some(&schema)).map_err(RpcError::database)?;
+        Ok((session, schema))
+    }
+
+    fn column(&self, key: &str) -> Result<ColumnDefinition, RpcError> {
+        serde_json::from_value(self.params.get(key).cloned().unwrap_or(Value::Null))
+            .map_err(|error| RpcError::invalid_params(format!("Invalid '{key}': {error}")))
+    }
+
+    fn columns(&self, key: &str) -> Result<Vec<ColumnDefinition>, RpcError> {
+        serde_json::from_value(self.params.get(key).cloned().unwrap_or_else(|| json!([])))
+            .map_err(|error| RpcError::invalid_params(format!("Invalid '{key}': {error}")))
+    }
+
+    fn strings(&self, key: &str) -> Option<Vec<String>> {
+        self.params
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+    }
+
+    fn u32(&self, keys: &[&str]) -> Option<u32> {
+        keys.iter().find_map(|key| {
+            self.params
+                .get(key)
+                .and_then(Value::as_u64)
+                .map(|value| value.min(u32::MAX as u64) as u32)
+        })
+    }
 }
 
-fn parse_column_definition(value: &Value) -> Result<ColumnDefinition, String> {
-    serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+/// Serializes a handler's outcome into a JSON-RPC result or database error.
+fn reply<T: Serialize>(result: PluginResult<T>) -> RpcResult {
+    let value = result.map_err(RpcError::database)?;
+    serde_json::to_value(value).map_err(|error| RpcError::database(error.to_string()))
+}
+
+fn dispatch(method: &str, request: &Request) -> RpcResult {
+    match method {
+        // -- Connection ------------------------------------------------------
+        "test_connection" => {
+            let session = request.session()?;
+            reply(query::test_connection(&session).map(|()| json!({ "success": true })))
+        }
+        "ping" => {
+            let session = request.session()?;
+            reply(query::test_connection(&session))
+        }
+
+        // -- Schema discovery ------------------------------------------------
+        "get_databases" => reply(metadata::get_databases(&request.session()?)),
+        "get_schemas" => reply(metadata::get_schemas(&request.session()?)),
+        "get_tables" => {
+            let (session, schema) = request.schema_session()?;
+            reply(metadata::get_tables(&session, &schema))
+        }
+        "get_columns" => {
+            let (session, schema) = request.schema_session()?;
+            let table = request.required(&["table", "table_name"])?;
+            reply(metadata::get_columns(&session, &schema, table))
+        }
+        "get_foreign_keys" => {
+            let (session, schema) = request.schema_session()?;
+            let table = request.required(&["table", "table_name"])?;
+            reply(metadata::get_foreign_keys(&session, &schema, table))
+        }
+        "get_indexes" => {
+            let (session, schema) = request.schema_session()?;
+            let table = request.required(&["table", "table_name"])?;
+            reply(metadata::get_indexes(&session, &schema, table))
+        }
+        "get_all_columns_batch" => {
+            let (session, schema) = request.schema_session()?;
+            let tables = request.strings("tables");
+            reply(metadata::get_all_columns_batch(
+                &session,
+                &schema,
+                tables.as_deref(),
+            ))
+        }
+        "get_all_foreign_keys_batch" => {
+            let (session, schema) = request.schema_session()?;
+            let tables = request.strings("tables");
+            reply(metadata::get_all_foreign_keys_batch(
+                &session,
+                &schema,
+                tables.as_deref(),
+            ))
+        }
+        "get_schema_snapshot" => {
+            let (session, schema) = request.schema_session()?;
+            reply(metadata::get_schema_snapshot(&session, &schema))
+        }
+
+        // -- Views -----------------------------------------------------------
+        "get_views" => {
+            let (session, schema) = request.schema_session()?;
+            reply(metadata::get_views(&session, &schema))
+        }
+        "get_view_definition" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            reply(metadata::get_view_definition(&session, &schema, view))
+        }
+        "get_view_columns" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            reply(metadata::get_columns(&session, &schema, view))
+        }
+
+        // -- Routines --------------------------------------------------------
+        "get_routines" => {
+            let (session, schema) = request.schema_session()?;
+            reply(metadata::get_routines(&session, &schema))
+        }
+        "get_routine_parameters" => {
+            let (session, schema) = request.schema_session()?;
+            let routine = request.required(&["routine_name", "routine"])?;
+            reply(metadata::get_routine_parameters(&session, &schema, routine))
+        }
+        "get_routine_definition" => {
+            let (session, schema) = request.schema_session()?;
+            let routine = request.required(&["routine_name", "routine"])?;
+            reply(metadata::get_routine_definition(&session, &schema, routine))
+        }
+
+        // -- Queries ---------------------------------------------------------
+        "execute_query" => {
+            let (session, _) = request.schema_session()?;
+            reply(query::execute_query(
+                &session,
+                request.text(&["query"]).unwrap_or_default(),
+                request.u32(&["limit", "page_size"]),
+                request.u32(&["page"]).unwrap_or(1),
+            ))
+        }
+        "explain_query" => {
+            let (session, _) = request.schema_session()?;
+            reply(query::explain_query(
+                &session,
+                request.text(&["query"]).unwrap_or_default(),
+                request
+                    .params
+                    .get("analyze")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ))
+        }
+
+        // -- Records ---------------------------------------------------------
+        "insert_record" => {
+            let (session, schema) = request.schema_session()?;
+            let data: HashMap<String, Value> = serde_json::from_value(
+                request
+                    .params
+                    .get("data")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            )
+            .map_err(|error| RpcError::invalid_params(format!("Invalid 'data': {error}")))?;
+            reply(crud::insert_record(
+                &session,
+                request.required(&["table"])?,
+                &data,
+                Some(&schema),
+            ))
+        }
+        "update_record" => {
+            let (session, schema) = request.schema_session()?;
+            reply(crud::update_record(
+                &session,
+                request.required(&["table"])?,
+                request.text(&["pk_col"]).unwrap_or_default(),
+                request.params.get("pk_val").unwrap_or(&Value::Null),
+                request.text(&["col_name"]).unwrap_or_default(),
+                request.params.get("new_val").unwrap_or(&Value::Null),
+                Some(&schema),
+            ))
+        }
+        "delete_record" => {
+            let (session, schema) = request.schema_session()?;
+            reply(crud::delete_record(
+                &session,
+                request.required(&["table"])?,
+                request.text(&["pk_col"]).unwrap_or_default(),
+                request.params.get("pk_val").unwrap_or(&Value::Null),
+                Some(&schema),
+            ))
+        }
+
+        // -- DDL generation (pure SQL builders, no connection) ----------------
+        "get_create_table_sql" => Ok(json!(ddl::get_create_table_sql(
+            request.text(&["table_name", "table"]).unwrap_or_default(),
+            &request.columns("columns")?,
+            request.text(&["schema"]),
+        ))),
+        "get_add_column_sql" => Ok(json!(ddl::get_add_column_sql(
+            request.text(&["table"]).unwrap_or_default(),
+            &request.column("column")?,
+            request.text(&["schema"]),
+        ))),
+        "get_alter_column_sql" => Ok(json!(ddl::get_alter_column_sql(
+            request.text(&["table"]).unwrap_or_default(),
+            &request.column("old_column")?,
+            &request.column("new_column")?,
+            request.text(&["schema"]),
+        ))),
+        "get_create_index_sql" => Ok(json!(ddl::get_create_index_sql(
+            request.text(&["table"]).unwrap_or_default(),
+            request.text(&["index_name"]).unwrap_or_default(),
+            &request.strings("columns").unwrap_or_default(),
+            request
+                .params
+                .get("is_unique")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            request.text(&["schema"]),
+        ))),
+        "get_create_foreign_key_sql" => Ok(json!(ddl::get_create_foreign_key_sql(
+            request.text(&["table"]).unwrap_or_default(),
+            request.text(&["fk_name"]).unwrap_or_default(),
+            request.text(&["column"]).unwrap_or_default(),
+            request.text(&["ref_table"]).unwrap_or_default(),
+            request.text(&["ref_column"]).unwrap_or_default(),
+            request.text(&["on_delete"]),
+            request.text(&["on_update"]),
+            request.text(&["schema"]),
+        ))),
+
+        // -- DDL execution ---------------------------------------------------
+        "drop_index" => {
+            let (session, schema) = request.schema_session()?;
+            let sql = ddl::drop_index_sql(
+                request.text(&["table"]).unwrap_or_default(),
+                request.required(&["index_name"])?,
+                Some(&schema),
+            );
+            reply(session.execute(&sql).map(|_| Value::Null))
+        }
+        "drop_foreign_key" => {
+            let (session, schema) = request.schema_session()?;
+            let sql = ddl::drop_foreign_key_sql(
+                request.required(&["table"])?,
+                request.required(&["fk_name", "constraint_name"])?,
+                Some(&schema),
+            );
+            reply(session.execute(&sql).map(|_| Value::Null))
+        }
+
+        _ => Err(RpcError::method_not_found(method)),
+    }
 }
 
 fn main() {
@@ -53,6 +350,8 @@ fn main() {
     let mut stdout = io::stdout();
     let mut settings = PluginSettings::default();
 
+    // Tabularis closes stdin when the session ends; reaching EOF ends the
+    // loop and the process with it.
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(line) if !line.trim().is_empty() => line,
@@ -71,422 +370,112 @@ fn main() {
             }
         };
 
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let method = match request.get("method").and_then(Value::as_str) {
-            Some(method) => method,
-            None => {
-                let _ = rpc::send_error(&mut stdout, id, -32600, "Method not specified");
-                continue;
-            }
+        let method = request.get("method").and_then(Value::as_str);
+        // A request without an id is a notification (for example `cancel`):
+        // it must not be answered, or the reply would land on stdout as an
+        // unexpected line.
+        let Some(id) = request.get("id").cloned() else {
+            continue;
+        };
+        let Some(method) = method else {
+            let _ = rpc::send_error(&mut stdout, id, -32600, "Method not specified");
+            continue;
         };
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
 
-        let response = match method {
-            "initialize" => {
-                settings = serde_json::from_value(
-                    params.get("settings").cloned().unwrap_or_else(|| json!({})),
-                )
-                .unwrap_or_default();
-                rpc::send_success(&mut stdout, id, json!(null))
-            }
-            "test_connection" | "ping" => {
-                let request_params =
-                    parse_connection_params(params.get("params").unwrap_or(&Value::Null));
-                match request_params
-                    .and_then(|request_params| query::test_connection(&request_params, &settings))
-                {
-                    Ok(()) => rpc::send_success(&mut stdout, id, json!(null)),
-                    Err(error) => rpc::send_error(&mut stdout, id, -32000, &error),
-                }
-            }
-            "get_databases" => {
-                let request_params =
-                    parse_connection_params(params.get("params").unwrap_or(&Value::Null));
-                match request_params
-                    .and_then(|request_params| metadata::get_databases(&request_params, &settings))
-                {
-                    Ok(result) => rpc::send_success(&mut stdout, id, result),
-                    Err(error) => rpc::send_error(&mut stdout, id, -32001, &error),
-                }
-            }
-            "get_schemas" => {
-                let request_params =
-                    parse_connection_params(params.get("params").unwrap_or(&Value::Null));
-                match request_params
-                    .and_then(|request_params| metadata::get_schemas(&request_params, &settings))
-                {
-                    Ok(result) => rpc::send_success(&mut stdout, id, result),
-                    Err(error) => rpc::send_error(&mut stdout, id, -32002, &error),
-                }
-            }
-            "get_tables"
-            | "get_views"
-            | "get_view_definition"
-            | "get_view_columns"
-            | "get_columns"
-            | "get_foreign_keys"
-            | "get_indexes"
-            | "get_routines"
-            | "get_routine_parameters"
-            | "get_routine_definition"
-            | "get_all_columns_batch"
-            | "get_all_foreign_keys_batch"
-            | "get_schema_snapshot"
-            | "execute_query"
-            | "explain_query"
-            | "insert_record"
-            | "update_record"
-            | "delete_record"
-            | "drop_index"
-            | "drop_foreign_key" => {
-                let request_params =
-                    match parse_connection_params(params.get("params").unwrap_or(&Value::Null)) {
-                        Ok(request_params) => request_params,
-                        Err(error) => {
-                            let _ = rpc::send_error(&mut stdout, id, -32602, &error);
-                            continue;
-                        }
-                    };
-                let schema = schema_param(&params, &request_params, &settings);
-
-                match method {
-                    "get_tables" => match metadata::get_tables(&request_params, &settings, &schema)
-                    {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32003, &error),
-                    },
-                    "get_views" => match metadata::get_views(&request_params, &settings, &schema) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32004, &error),
-                    },
-                    "get_view_definition" => match metadata::get_view_definition(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params
-                            .get("view_name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32005, &error),
-                    },
-                    "get_view_columns" => match metadata::get_columns(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params
-                            .get("view_name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32006, &error),
-                    },
-                    "get_columns" => match metadata::get_columns(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params.get("table").and_then(Value::as_str).unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32007, &error),
-                    },
-                    "get_foreign_keys" => match metadata::get_foreign_keys(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params.get("table").and_then(Value::as_str).unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32008, &error),
-                    },
-                    "get_indexes" => match metadata::get_indexes(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params.get("table").and_then(Value::as_str).unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32009, &error),
-                    },
-                    "get_routines" => {
-                        match metadata::get_routines(&request_params, &settings, &schema) {
-                            Ok(result) => rpc::send_success(&mut stdout, id, result),
-                            Err(error) => rpc::send_error(&mut stdout, id, -32010, &error),
-                        }
-                    }
-                    "get_routine_parameters" => match metadata::get_routine_parameters(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params
-                            .get("routine_name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32011, &error),
-                    },
-                    "get_routine_definition" => match metadata::get_routine_definition(
-                        &request_params,
-                        &settings,
-                        &schema,
-                        params
-                            .get("routine_name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32012, &error),
-                    },
-                    "get_all_columns_batch" => {
-                        match metadata::get_all_columns_batch(&request_params, &settings, &schema) {
-                            Ok(result) => rpc::send_success(&mut stdout, id, result),
-                            Err(error) => rpc::send_error(&mut stdout, id, -32013, &error),
-                        }
-                    }
-                    "get_all_foreign_keys_batch" => match metadata::get_all_foreign_keys_batch(
-                        &request_params,
-                        &settings,
-                        &schema,
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32014, &error),
-                    },
-                    "get_schema_snapshot" => {
-                        match metadata::get_schema_snapshot(&request_params, &settings, &schema) {
-                            Ok(result) => rpc::send_success(&mut stdout, id, result),
-                            Err(error) => rpc::send_error(&mut stdout, id, -32015, &error),
-                        }
-                    }
-                    "execute_query" => match query::execute_query(
-                        &request_params,
-                        &settings,
-                        params.get("query").and_then(Value::as_str).unwrap_or(""),
-                        params
-                            .get("limit")
-                            .and_then(Value::as_u64)
-                            .map(|value| value as u32),
-                        params
-                            .get("page")
-                            .and_then(Value::as_u64)
-                            .map(|value| value as u32)
-                            .unwrap_or(1),
-                        Some(&schema),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32016, &error),
-                    },
-                    "explain_query" => match query::explain_query(
-                        &request_params,
-                        &settings,
-                        params.get("query").and_then(Value::as_str).unwrap_or(""),
-                        params
-                            .get("analyze")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        Some(&schema),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32017, &error),
-                    },
-                    "insert_record" => {
-                        let data: HashMap<String, Value> = serde_json::from_value(
-                            params.get("data").cloned().unwrap_or_else(|| json!({})),
-                        )
-                        .unwrap_or_default();
-                        match crud::insert_record(
-                            &request_params,
-                            &settings,
-                            params.get("table").and_then(Value::as_str).unwrap_or(""),
-                            &data,
-                            Some(&schema),
-                        ) {
-                            Ok(result) => rpc::send_success(&mut stdout, id, result),
-                            Err(error) => rpc::send_error(&mut stdout, id, -32018, &error),
-                        }
-                    }
-                    "update_record" => match crud::update_record(
-                        &request_params,
-                        &settings,
-                        params.get("table").and_then(Value::as_str).unwrap_or(""),
-                        params.get("pk_col").and_then(Value::as_str).unwrap_or(""),
-                        params.get("pk_val").unwrap_or(&Value::Null),
-                        params.get("col_name").and_then(Value::as_str).unwrap_or(""),
-                        params.get("new_val").unwrap_or(&Value::Null),
-                        Some(&schema),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32019, &error),
-                    },
-                    "delete_record" => match crud::delete_record(
-                        &request_params,
-                        &settings,
-                        params.get("table").and_then(Value::as_str).unwrap_or(""),
-                        params.get("pk_col").and_then(Value::as_str).unwrap_or(""),
-                        params.get("pk_val").unwrap_or(&Value::Null),
-                        Some(&schema),
-                    ) {
-                        Ok(result) => rpc::send_success(&mut stdout, id, result),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32020, &error),
-                    },
-                    "drop_index" => match client::execute_statement(
-                        &request_params,
-                        &settings,
-                        Some(&schema),
-                        &ddl::drop_index_sql(
-                            params.get("table").and_then(Value::as_str).unwrap_or(""),
-                            params
-                                .get("index_name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(""),
-                            Some(&schema),
-                        ),
-                    ) {
-                        Ok(_) => rpc::send_success(&mut stdout, id, json!(null)),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32021, &error),
-                    },
-                    "drop_foreign_key" => match client::execute_statement(
-                        &request_params,
-                        &settings,
-                        Some(&schema),
-                        &ddl::drop_foreign_key_sql(
-                            params.get("table").and_then(Value::as_str).unwrap_or(""),
-                            params.get("fk_name").and_then(Value::as_str).unwrap_or(""),
-                            Some(&schema),
-                        ),
-                    ) {
-                        Ok(_) => rpc::send_success(&mut stdout, id, json!(null)),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32022, &error),
-                    },
-                    _ => rpc::send_error(&mut stdout, id, -32601, "Method not implemented"),
-                }
-            }
-            "get_create_table_sql"
-            | "get_add_column_sql"
-            | "get_alter_column_sql"
-            | "get_create_index_sql"
-            | "get_create_foreign_key_sql" => match method {
-                "get_create_table_sql" => {
-                    let columns = params
-                        .get("columns")
-                        .and_then(Value::as_array)
-                        .map(|columns| {
-                            columns
-                                .iter()
-                                .map(parse_column_definition)
-                                .collect::<Result<Vec<_>, _>>()
-                        })
-                        .unwrap_or_else(|| Ok(Vec::new()));
-                    match columns {
-                        Ok(columns) => rpc::send_success(
-                            &mut stdout,
-                            id,
-                            ddl::get_create_table_sql(
-                                params
-                                    .get("table_name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or(""),
-                                &columns,
-                                params.get("schema").and_then(Value::as_str),
-                            ),
-                        ),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32602, &error),
-                    }
-                }
-                "get_add_column_sql" => {
-                    match parse_column_definition(params.get("column").unwrap_or(&Value::Null)) {
-                        Ok(column) => rpc::send_success(
-                            &mut stdout,
-                            id,
-                            ddl::get_add_column_sql(
-                                params.get("table").and_then(Value::as_str).unwrap_or(""),
-                                &column,
-                                params.get("schema").and_then(Value::as_str),
-                            ),
-                        ),
-                        Err(error) => rpc::send_error(&mut stdout, id, -32602, &error),
-                    }
-                }
-                "get_alter_column_sql" => {
-                    let old_column =
-                        parse_column_definition(params.get("old_column").unwrap_or(&Value::Null));
-                    let new_column =
-                        parse_column_definition(params.get("new_column").unwrap_or(&Value::Null));
-                    match (old_column, new_column) {
-                        (Ok(old_column), Ok(new_column)) => rpc::send_success(
-                            &mut stdout,
-                            id,
-                            ddl::get_alter_column_sql(
-                                params.get("table").and_then(Value::as_str).unwrap_or(""),
-                                &old_column,
-                                &new_column,
-                                params.get("schema").and_then(Value::as_str),
-                            ),
-                        ),
-                        (Err(error), _) | (_, Err(error)) => {
-                            rpc::send_error(&mut stdout, id, -32602, &error)
-                        }
-                    }
-                }
-                "get_create_index_sql" => {
-                    let columns = params
-                        .get("columns")
-                        .and_then(Value::as_array)
-                        .map(|values| {
-                            values
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    rpc::send_success(
-                        &mut stdout,
-                        id,
-                        ddl::get_create_index_sql(
-                            params.get("table").and_then(Value::as_str).unwrap_or(""),
-                            params
-                                .get("index_name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(""),
-                            &columns,
-                            params
-                                .get("is_unique")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
-                            params.get("schema").and_then(Value::as_str),
-                        ),
-                    )
-                }
-                "get_create_foreign_key_sql" => rpc::send_success(
-                    &mut stdout,
-                    id,
-                    ddl::get_create_foreign_key_sql(
-                        params.get("table").and_then(Value::as_str).unwrap_or(""),
-                        params.get("fk_name").and_then(Value::as_str).unwrap_or(""),
-                        params.get("column").and_then(Value::as_str).unwrap_or(""),
-                        params
-                            .get("ref_table")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                        params
-                            .get("ref_column")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                        params.get("on_delete").and_then(Value::as_str),
-                        params.get("on_update").and_then(Value::as_str),
-                        params.get("schema").and_then(Value::as_str),
-                    ),
-                ),
-                _ => rpc::send_error(&mut stdout, id, -32601, "Method not implemented"),
-            },
-            _ => rpc::send_error(&mut stdout, id, -32601, "Method not implemented"),
+        let outcome = if method == "initialize" {
+            settings = serde_json::from_value(
+                params.get("settings").cloned().unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default();
+            Ok(Value::Null)
+        } else {
+            dispatch(
+                method,
+                &Request {
+                    params: &params,
+                    settings: &settings,
+                },
+            )
         };
 
-        if let Err(error) = response {
+        let written = match outcome {
+            Ok(result) => rpc::send_success(&mut stdout, id, result),
+            Err(error) => rpc::send_error(&mut stdout, id, error.code, &error.message),
+        };
+        if let Err(error) = written {
             eprintln!("Failed to write JSON-RPC response: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dispatch, Request};
+    use crate::models::PluginSettings;
+    use serde_json::json;
+
+    fn schema_of(params: serde_json::Value, settings: &PluginSettings) -> String {
+        let request = Request {
+            params: &params,
+            settings,
+        };
+        let connection = request.connection().expect("valid connection");
+        request.schema(&connection)
+    }
+
+    fn connection() -> serde_json::Value {
+        json!({ "driver": "db2", "host": "h", "port": 50000, "username": "db2inst1",
+                "password": "x", "database": "SAMPLE" })
+    }
+
+    #[test]
+    fn schema_falls_back_to_the_setting_then_to_the_users_own_schema() {
+        let defaults = PluginSettings::default();
+        let with_setting = PluginSettings {
+            current_schema: Some("APP".to_string()),
+            ..PluginSettings::default()
+        };
+
+        // The schema Tabularis selected wins, exactly as written.
+        let selected = json!({ "params": connection(), "schema": "Mixed Case" });
+        assert_eq!(schema_of(selected.clone(), &with_setting), "Mixed Case");
+
+        // Without one (null or empty), the "Default Schema" setting applies.
+        let unselected = json!({ "params": connection(), "schema": null });
+        assert_eq!(schema_of(unselected.clone(), &with_setting), "APP");
+        let empty = json!({ "params": connection(), "schema": "" });
+        assert_eq!(schema_of(empty, &with_setting), "APP");
+
+        // Without either, Db2's implicit schema: the authorization ID in
+        // upper case, which is how the catalog stores it.
+        assert_eq!(schema_of(unselected, &defaults), "DB2INST1");
+    }
+
+    #[test]
+    fn rejects_bad_requests_before_connecting() {
+        let settings = PluginSettings::default();
+        let run = |method: &str, params: serde_json::Value| {
+            dispatch(
+                method,
+                &Request {
+                    params: &params,
+                    settings: &settings,
+                },
+            )
+        };
+
+        let error = run("no_such_method", json!({})).unwrap_err();
+        assert_eq!(error.code, -32601);
+        assert_eq!(error.message, "Method not found: no_such_method");
+
+        let error = run("get_tables", json!({})).unwrap_err();
+        assert_eq!(error.code, -32602);
+
+        let mut other_driver = connection();
+        other_driver["driver"] = json!("postgres");
+        let error = run("get_tables", json!({ "params": other_driver })).unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "Unsupported driver 'postgres'");
     }
 }

@@ -122,6 +122,20 @@ impl Plugin {
         json!({ "params": conn_params() })
     }
 
+    /// Like `schema_params`, for a schema other than TEST_SCHEMA.
+    fn params_in(&self, schema: &str, extras: Value) -> Value {
+        let mut params = self.schema_params(extras);
+        params["schema"] = json!(schema);
+        params
+    }
+
+    /// Writes one raw line to the plugin without waiting for an answer.
+    fn send_raw(&mut self, line: &str) {
+        self.stdin.write_all(line.as_bytes()).unwrap();
+        self.stdin.write_all(b"\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     fn schema_params(&self, extras: Value) -> Value {
         let mut base = json!({
             "params": conn_params(),
@@ -184,10 +198,27 @@ fn test_get_schemas() {
     let result = p.call_ok("get_schemas", p.base_params());
     let schemas = result.as_array().expect("expected array");
     let names: Vec<&str> = schemas.iter().filter_map(Value::as_str).collect();
-    assert!(
-        names.iter().any(|s| s.trim() == "TEST_SCHEMA"),
-        "TEST_SCHEMA not found in: {names:?}"
-    );
+
+    // User schemas are listed: one with objects, one that is empty, and one
+    // whose name only exists as a delimited identifier.
+    for expected in ["TEST_SCHEMA", "EMPTY_SCHEMA", "Mixed Case"] {
+        assert!(
+            names.contains(&expected),
+            "{expected} not found in: {names:?}"
+        );
+    }
+
+    // Schemas Db2 owns are not offered for browsing.
+    for name in &names {
+        assert!(
+            !name.starts_with("SYS") && *name != "NULLID" && *name != "SQLJ",
+            "system schema {name} should not be listed"
+        );
+    }
+
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "schemas should be sorted by name");
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +261,39 @@ fn test_get_tables() {
         departments.get("comment").is_none(),
         "tables without remarks should omit comment"
     );
+}
+
+#[test]
+fn test_get_tables_edge_cases() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // An empty schema has no tables, and that is not an error.
+    let result = p.call_ok("get_tables", p.params_in("EMPTY_SCHEMA", json!({})));
+    assert_eq!(result, json!([]));
+
+    // Neither is a schema that does not exist.
+    let result = p.call_ok("get_tables", p.params_in("NO_SUCH_SCHEMA", json!({})));
+    assert_eq!(result, json!([]));
+
+    // A delimited schema name with mixed case and a space, holding a table
+    // whose name needs delimiters too.
+    let result = p.call_ok("get_tables", p.params_in("Mixed Case", json!({})));
+    assert_eq!(
+        result,
+        json!([{ "name": "Order Details", "comment": "Line items (delimited names)" }])
+    );
+
+    // Views are not tables: they are listed by get_views.
+    let result = p.call_ok("get_tables", p.schema_params(json!({})));
+    let names: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|table| table["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"V_EMP_DETAILS"), "views listed as tables");
+    assert!(names.contains(&"TYPE_METADATA_TEST"));
 }
 
 #[test]
@@ -296,6 +360,239 @@ fn test_get_columns() {
         first_name.get("comment").is_none(),
         "columns without remarks should omit comment"
     );
+}
+
+/// `[name, data_type, full_type, character_maximum_length, numeric_precision,
+/// numeric_scale]` of a column, for compact comparisons.
+fn type_summary(column: &Value) -> Value {
+    json!([
+        column["name"],
+        column["data_type"],
+        column.get("full_type").cloned().unwrap_or(Value::Null),
+        column["character_maximum_length"],
+        column
+            .get("numeric_precision")
+            .cloned()
+            .unwrap_or(Value::Null),
+        column.get("numeric_scale").cloned().unwrap_or(Value::Null),
+    ])
+}
+
+#[test]
+fn test_get_columns_type_metadata() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let result = p.call_ok(
+        "get_columns",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST" })),
+    );
+    let columns = result.as_array().expect("expected array");
+    let summary: Vec<Value> = columns.iter().map(type_summary).collect();
+
+    // Lengths only for string and binary types, precision and scale only for
+    // decimals: the catalog's storage sizes (4 bytes for an INTEGER or a
+    // DATE) must not leak out as lengths.
+    assert_eq!(
+        json!(summary),
+        json!([
+            ["ID", "BIGINT", null, null, null, null],
+            ["COL_CHAR", "CHAR", "CHAR(10)", 10, null, null],
+            ["COL_VARCHAR", "VARCHAR", "VARCHAR(255)", 255, null, null],
+            [
+                "COL_BIT_DATA",
+                "VARCHAR",
+                "VARCHAR(16) FOR BIT DATA",
+                16,
+                null,
+                null
+            ],
+            ["COL_GRAPHIC", "GRAPHIC", "GRAPHIC(4)", 4, null, null],
+            [
+                "COL_VARGRAPHIC",
+                "VARGRAPHIC",
+                "VARGRAPHIC(40)",
+                40,
+                null,
+                null
+            ],
+            ["COL_SMALLINT", "SMALLINT", null, null, null, null],
+            ["COL_INTEGER", "INTEGER", null, null, null, null],
+            ["COL_DECIMAL", "DECIMAL", "DECIMAL(18,4)", null, 18, 4],
+            ["COL_DECFLOAT16", "DECFLOAT", "DECFLOAT(16)", null, 16, null],
+            ["COL_DECFLOAT34", "DECFLOAT", "DECFLOAT(34)", null, 34, null],
+            ["COL_REAL", "REAL", null, null, null, null],
+            ["COL_DOUBLE", "DOUBLE", null, null, null, null],
+            ["COL_BOOLEAN", "BOOLEAN", null, null, null, null],
+            ["COL_DATE", "DATE", null, null, null, null],
+            ["COL_TIME", "TIME", null, null, null, null],
+            ["COL_TIMESTAMP", "TIMESTAMP", null, null, null, null],
+            [
+                "COL_TIMESTAMP12",
+                "TIMESTAMP",
+                "TIMESTAMP(12)",
+                null,
+                null,
+                null
+            ],
+            ["COL_CLOB", "CLOB", "CLOB(1M)", 1048576, null, null],
+            ["COL_DBCLOB", "DBCLOB", "DBCLOB(64K)", 65536, null, null],
+            ["COL_BLOB", "BLOB", "BLOB(2M)", 2097152, null, null],
+            ["COL_BINARY", "BINARY", "BINARY(16)", 16, null, null],
+            [
+                "COL_VARBINARY",
+                "VARBINARY",
+                "VARBINARY(64)",
+                64,
+                null,
+                null
+            ],
+            ["COL_XML", "XML", null, null, null, null],
+            ["COL_COMPUTED", "INTEGER", null, null, null, null],
+        ]),
+        // COL_HIDDEN is implicitly hidden: SELECT * does not return it, so
+        // the metadata does not list it either.
+    );
+
+    let column = |name: &str| {
+        columns
+            .iter()
+            .find(|column| column["name"] == name)
+            .unwrap_or_else(|| panic!("{name} column missing"))
+    };
+
+    // Identity: auto-increment, and not "generated" (a value may be given).
+    assert_eq!(column("ID")["is_pk"], json!(true));
+    assert_eq!(column("ID")["is_auto_increment"], json!(true));
+    assert_eq!(column("ID")["is_generated"], json!(false));
+    assert_eq!(column("ID")["is_nullable"], json!(false));
+
+    // A GENERATED ALWAYS AS (expression) column is computed by Db2.
+    assert_eq!(column("COL_COMPUTED")["is_generated"], json!(true));
+    assert_eq!(column("COL_COMPUTED")["is_auto_increment"], json!(false));
+
+    // Defaults come back as SQL, usable after DEFAULT as they are.
+    for (name, default) in [
+        ("COL_CHAR", "'N/A'"),
+        ("COL_SMALLINT", "1"),
+        ("COL_DECIMAL", "0"),
+        ("COL_BOOLEAN", "FALSE"),
+        ("COL_DATE", "CURRENT DATE"),
+        ("COL_TIMESTAMP", "CURRENT TIMESTAMP"),
+    ] {
+        assert_eq!(column(name)["default_value"], json!(default), "{name}");
+        assert_eq!(column(name)["default_sql"], json!(default), "{name}");
+    }
+    assert_eq!(column("COL_VARCHAR")["default_value"], Value::Null);
+    assert!(column("COL_VARCHAR").get("default_sql").is_none());
+
+    assert_eq!(column("COL_CHAR")["is_nullable"], json!(false));
+    assert_eq!(column("COL_VARCHAR")["is_nullable"], json!(true));
+    assert_eq!(
+        column("COL_DECIMAL")["comment"],
+        json!("Amount, 4 decimals")
+    );
+}
+
+#[test]
+fn test_get_columns_special_names() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let result = p.call_ok(
+        "get_columns",
+        p.params_in("Mixed Case", json!({ "table": "Order Details" })),
+    );
+    let names: Vec<&str> = result
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .filter_map(|column| column["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Order Id",
+            "Unit Price",
+            "select",
+            "Qty#",
+            "O'Brien",
+            "Größe"
+        ]
+    );
+    assert_eq!(result[0]["is_pk"], json!(true));
+    assert_eq!(result[1]["default_value"], json!("0"));
+
+    // A view in that schema, through get_view_columns.
+    let result = p.call_ok(
+        "get_view_columns",
+        p.params_in("Mixed Case", json!({ "view_name": "Cheap Orders" })),
+    );
+    let summary: Vec<Value> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(type_summary)
+        .collect();
+    assert_eq!(
+        json!(summary),
+        json!([
+            ["Order Id", "INTEGER", null, null, null, null],
+            ["Unit Price", "DECIMAL", "DECIMAL(9,2)", null, 9, 2],
+        ])
+    );
+
+    // A quote in the names is data, not SQL: no error, no match.
+    let result = p.call_ok(
+        "get_columns",
+        p.params_in("Mixed' Case", json!({ "table": "Order' Details" })),
+    );
+    assert_eq!(result, json!([]));
+
+    // A table that does not exist has no columns.
+    let result = p.call_ok("get_columns", p.schema_params(json!({ "table": "NOPE" })));
+    assert_eq!(result, json!([]));
+
+    // The table name is required.
+    let resp = p.call("get_columns", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+}
+
+#[test]
+fn test_get_all_columns_batch_matches_get_columns() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let batch = p.call_ok("get_all_columns_batch", p.schema_params(json!({})));
+    let map = batch.as_object().expect("expected object");
+
+    // Every table and view of the schema, each with the same columns
+    // get_columns reports for it.
+    for table in [
+        "EMPLOYEES",
+        "TYPE_METADATA_TEST",
+        "EMP_PROJECTS",
+        "V_EMP_DETAILS",
+    ] {
+        let single = p.call_ok("get_columns", p.schema_params(json!({ "table": table })));
+        assert_eq!(map.get(table), Some(&single), "{table}");
+    }
+
+    // `tables` narrows the batch.
+    let batch = p.call_ok(
+        "get_all_columns_batch",
+        p.schema_params(json!({ "tables": ["EMPLOYEES", "DEPARTMENTS", "NOPE"] })),
+    );
+    let mut keys: Vec<&String> = batch.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["DEPARTMENTS", "EMPLOYEES"]);
+
+    // An empty schema gives an empty map.
+    let batch = p.call_ok(
+        "get_all_columns_batch",
+        p.params_in("EMPTY_SCHEMA", json!({})),
+    );
+    assert_eq!(batch, json!({}));
 }
 
 #[test]
@@ -578,6 +875,44 @@ fn test_get_schema_snapshot() {
         .as_array()
         .expect("expected foreign_keys array");
     assert!(!fks.is_empty(), "EMPLOYEES snapshot should include FK data");
+}
+
+#[test]
+fn test_get_schema_snapshot_edge_cases() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let snapshot = p.call_ok(
+        "get_schema_snapshot",
+        p.params_in("EMPTY_SCHEMA", json!({})),
+    );
+    assert_eq!(snapshot, json!([]));
+
+    let snapshot = p.call_ok("get_schema_snapshot", p.params_in("Mixed Case", json!({})));
+    let tables = snapshot.as_array().expect("expected array");
+    assert_eq!(tables.len(), 1, "views are not part of the snapshot");
+    assert_eq!(tables[0]["name"], json!("Order Details"));
+    assert_eq!(tables[0]["columns"].as_array().unwrap().len(), 6);
+    assert_eq!(tables[0]["foreign_keys"], json!([]));
+
+    // The snapshot is the per-table metadata, table by table.
+    let snapshot = p.call_ok("get_schema_snapshot", p.schema_params(json!({})));
+    let tables = snapshot.as_array().unwrap();
+    let listed = p.call_ok("get_tables", p.schema_params(json!({})));
+    let listed: Vec<&Value> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| &t["name"])
+        .collect();
+    let in_snapshot: Vec<&Value> = tables.iter().map(|t| &t["name"]).collect();
+    assert_eq!(in_snapshot, listed);
+
+    for table in tables {
+        let name = table["name"].as_str().unwrap();
+        let columns = p.call_ok("get_columns", p.schema_params(json!({ "table": name })));
+        assert_eq!(table["columns"], columns, "{name}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,11 +1405,50 @@ fn test_invalid_method() {
     require_db2!();
     let mut p = Plugin::spawn();
 
+    // Tabularis falls back to its own behaviour for optional methods on
+    // -32601 (and, in older versions, on the "Method not found" text).
     let resp = p.call("nonexistent_method", json!({}));
-    assert!(
-        resp.get("error").is_some(),
-        "unknown method should return error"
+    assert_eq!(resp["error"]["code"], json!(-32601), "{resp}");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Method not found: nonexistent_method")
     );
+}
+
+#[test]
+fn test_notifications_are_not_answered() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // A request without an id (Tabularis sends `cancel` this way) must not
+    // produce a line on stdout: the next answer belongs to the next request.
+    p.send_raw(r#"{"jsonrpc":"2.0","method":"cancel","params":{"id":1}}"#);
+    let resp = p.call("ping", p.base_params());
+    assert!(resp.get("result").is_some(), "{resp}");
+    assert_eq!(resp["id"], json!(p.next_id - 1));
+}
+
+#[test]
+fn test_long_values_are_not_truncated() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // 28,000 bytes of multi-byte text: longer than one fetch buffer, with
+    // characters that straddle the buffer boundaries.
+    let qr = p.call_ok(
+        "execute_query",
+        p.schema_params(json!({
+            "query": "SELECT CAST(REPEAT('€uro-', 4000) AS CLOB(1M)) AS BIG, 'tail' AS AFTER_IT FROM SYSIBM.SYSDUMMY1",
+            "limit": 10,
+            "page": 1
+        })),
+    );
+    let row = &qr["rows"][0];
+    let big = row[0].as_str().expect("text value");
+    assert_eq!(big.chars().count(), 20_000);
+    assert_eq!(big, "€uro-".repeat(4000));
+    // The column after the long one is still read correctly.
+    assert_eq!(row[1], json!("tail"));
 }
 
 #[test]
@@ -1095,8 +1469,24 @@ fn test_bad_connection() {
             }
         }),
     );
-    assert!(
-        resp.get("error").is_some(),
-        "bad connection should return error"
-    );
+    let message = resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("bad connection should return error: {resp}"));
+    // The Db2 message, without the ODBC call name and driver tags around it.
+    assert!(message.starts_with("SQL30081N"), "{message}");
+    assert!(message.contains("SQLSTATE=08001"), "{message}");
+    assert!(!message.contains("ODBC emitted"), "{message}");
+
+    // A wrong password on a reachable server.
+    let mut params = conn_params();
+    params["password"] = json!("definitely-wrong");
+    let resp = p.call("test_connection", json!({ "params": params }));
+    let message = resp["error"]["message"].as_str().expect("error expected");
+    assert!(message.starts_with("SQL30082N"), "{message}");
+
+    // Another driver's connection is rejected before connecting.
+    let mut params = conn_params();
+    params["driver"] = json!("postgres");
+    let resp = p.call("test_connection", json!({ "params": params }));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
 }
