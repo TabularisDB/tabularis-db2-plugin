@@ -2,11 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
 ## [0.0.3] - 2026-08-06
 
 ### Features
 
 - Add plugin icon and reference it in the manifest by @debba
+
 ## [0.0.2] - 2026-07-30
 
 ### Bug Fixes
@@ -25,6 +28,7 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - Switch Discord invite URL to discord.com/invite/K2hmhfHRSt by @debba
+
 ## [0.0.1] - 2026-04-14
 
 ### Bug Fixes
@@ -45,4 +49,3 @@ All notable changes to this project will be documented in this file.
 - *(release)* Update macos runner to version 13 for x86_64 build by @debba
 - *(release)* Update macos runner to macos-latest by @debba
 - *(release)* Add macOS x86_64 cross-compile ODBC setup and env path by @debba
-

@@ -97,6 +97,7 @@ pub fn get_create_index_sql(
     )]
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn get_create_foreign_key_sql(
     table: &str,
     fk_name: &str,

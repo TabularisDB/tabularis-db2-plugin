@@ -5,101 +5,68 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 env:
   BINARY_NAME: tabularis-db2-plugin
 
 jobs:
-  prepare:
+  validate:
+    name: Validate release version
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v7
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Update .tabularium version
+      - name: Check tag matches manifest version
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' .tabularium > manifest.tmp.json
-          mv manifest.tmp.json .tabularium
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TABULARIUM_VERSION=$(jq -r .version .tabularium)
 
-      - name: Generate CHANGELOG.md
-        id: changelog
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: --tag ${{ github.ref_name }}
-        env:
-          OUTPUT: CHANGELOG.md
-          GITHUB_REPO: ${{ github.repository }}
+          if [ "$TAG_VERSION" != "$TABULARIUM_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match .tabularium version ($TABULARIUM_VERSION)"
+            exit 1
+          fi
 
-      - name: Commit version bump & changelog
+      - name: Check CHANGELOG.md has a section for this version
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .tabularium CHANGELOG.md
-          git commit -m "chore(release): ${{ github.ref_name }}" || true
-          git push origin HEAD:master
-
-      - name: Upload manifest as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: manifest
-          path: .tabularium
-          include-hidden-files: true
-
-      - name: Generate release notes (latest version only)
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: --tag ${{ github.ref_name }} --latest --strip header
-        env:
-          OUTPUT: RELEASE_NOTES.md
-          GITHUB_REPO: ${{ github.repository }}
-
-      - name: Upload release notes as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-notes
-          path: RELEASE_NOTES.md
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::No CHANGELOG.md section found for version $VERSION (expected a '## [$VERSION]' heading). Add one before tagging."
+            exit 1
+          fi
 
   build:
-    needs: prepare
+    name: ${{ matrix.platform-label }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            platform: linux-x64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            platform: linux-arm64
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            platform: darwin-x64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            platform: darwin-arm64
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            platform: win-x64
+          - platform-label: linux-x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary-suffix: ""
+          # Native arm64 runner rather than `cross`: the binary links against
+          # the ODBC driver manager, which a cross container would have to
+          # provide for the target architecture.
+          - platform-label: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary-suffix: ""
+          - platform-label: darwin-x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            binary-suffix: ""
+          - platform-label: darwin-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            binary-suffix: ""
+          - platform-label: win-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary-suffix: ".exe"
 
-    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download manifest artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: manifest
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -123,17 +90,7 @@ jobs:
           arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           arch -x86_64 /usr/local/bin/brew install unixodbc
 
-      - name: Cache cargo registry & build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-cargo-
-
-      - name: Build release binary
+      - name: Build
         env:
           LIBRARY_PATH: ${{ matrix.target == 'x86_64-apple-darwin' && '/usr/local/lib' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
@@ -141,47 +98,123 @@ jobs:
       - name: Package (unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir staging
-          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} staging/
-          cp .tabularium staging/
-          cd staging && zip -r ../db2-plugin-${{ matrix.platform }}.zip .
+          STAGE=staging
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.binary-suffix }} "$STAGE/"
+          cp .tabularium "$STAGE/"
+          (cd "$STAGE" && zip -r ../db2-plugin-${{ matrix.platform-label }}.zip .)
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target\${{ matrix.target }}\release\${{ env.BINARY_NAME }}.exe" staging\
-          Copy-Item ".tabularium" staging\
-          Compress-Archive -Path "staging\*" -DestinationPath "db2-plugin-${{ matrix.platform }}.zip"
+          $stage = "staging"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ env.BINARY_NAME }}${{ matrix.binary-suffix }}" $stage
+          Copy-Item ".tabularium" $stage
+          Compress-Archive -Path "$stage\*" -DestinationPath "db2-plugin-${{ matrix.platform-label }}.zip"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      # `initialize` needs no Db2 server or ODBC driver, only the ODBC driver
+      # manager the binary links against, which is installed on every runner
+      # above (and ships with Windows).
+      - name: Smoke test binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          response=$(echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | ./staging/${{ env.BINARY_NAME }}${{ matrix.binary-suffix }})
+          echo "$response"
+          echo "$response" | jq -e 'has("error") | not' > /dev/null || {
+            echo "::error::Binary did not return a valid initialize response"
+            exit 1
+          }
+
+      - name: Smoke test binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $response = '{"jsonrpc":"2.0","method":"initialize","id":1}' | & ".\staging\${{ env.BINARY_NAME }}${{ matrix.binary-suffix }}"
+          Write-Output $response
+          $parsed = $response | ConvertFrom-Json
+          if ($null -ne $parsed.error) {
+            Write-Error "Binary did not return a valid initialize response"
+            exit 1
+          }
+
+      - name: Stash artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: db2-plugin-${{ matrix.platform }}
-          path: db2-plugin-${{ matrix.platform }}.zip
+          name: db2-plugin-${{ matrix.platform-label }}
+          path: db2-plugin-${{ matrix.platform-label }}.zip
+          retention-days: 1
 
   release:
-    needs: [prepare, build]
+    name: Publish GitHub release
+    needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout (for the .tabularium manifest asset)
+        uses: actions/checkout@v7
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Download release notes
-        uses: actions/download-artifact@v4
-        with:
-          name: release-notes
+      - name: Detect prerelease from tag
+        id: meta
+        run: |
+          # Auto-flag prerelease when the tag has a "-" suffix (semver
+          # pre-release, e.g. v1.0.0-beta.1) — matches tabularis's own
+          # release.yml convention.
+          if [[ "${{ github.ref_name }}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          # Pull this version's section out of CHANGELOG.md so the GitHub
+          # release body is the same hand-written prose we already maintain.
+          # A version's section runs from its "## [x.y.z]" heading to the
+          # next one (or EOF for the oldest entry).
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              line = $0
+              sub(/^## \[/, "", line)
+              sub(/\].*/, "", line)
+              if (capturing) { exit }
+              if (line == ver) { capturing = 1; found = 1; next }
+              next
+            }
+            capturing { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > /tmp/release-notes.raw.md || {
+            echo "::error::No CHANGELOG.md section found for version $VERSION (expected a '## [$VERSION]' heading). Add one before tagging."
+            exit 1
+          }
+
+          # Trim leading/trailing blank lines the section boundary leaves
+          # behind, without collapsing intentional blank lines between bullets.
+          awk 'NF{p=1} p' /tmp/release-notes.raw.md | tac | awk 'NF{p=1} p' | tac > /tmp/release-notes.md
+
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "::error::CHANGELOG.md section for version $VERSION is empty."
+            exit 1
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
         with:
-          name: ${{ github.ref_name }}
-          body_path: RELEASE_NOTES.md
+          # .tabularium ships as a standalone asset: the registry resolves the
+          # manifest from release assets, not the git ref.
           files: |
             artifacts/*.zip
-            artifacts/.tabularium
-          generate_release_notes: false
+            .tabularium
+          body_path: /tmp/release-notes.md
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}
