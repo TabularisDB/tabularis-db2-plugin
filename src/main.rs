@@ -333,9 +333,8 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             reply(crud::delete_record(
                 &session,
                 request.required(&["table"])?,
-                request.text(&["pk_col"]).unwrap_or_default(),
-                request.params.get("pk_val").unwrap_or(&Value::Null),
-                Some(&schema),
+                &request.row_keys()?,
+                &schema,
             ))
         }
 

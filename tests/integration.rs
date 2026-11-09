@@ -1647,8 +1647,7 @@ fn test_crud_insert_update_delete() {
         "delete_record",
         p.schema_params(json!({
             "table": "CRUD_TEST",
-            "pk_col": "ID",
-            "pk_val": 100
+            "pk_map": { "ID": 100 }
         })),
     );
 
@@ -2555,6 +2554,313 @@ fn test_update_record_errors() {
         snapshot(&mut p),
         before,
         "no failed update changed anything"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Delete record
+// ---------------------------------------------------------------------------
+
+/// `delete_record` in TEST_SCHEMA; returns the raw response.
+fn delete(p: &mut Plugin, table: &str, pk_map: Value) -> Value {
+    p.call(
+        "delete_record",
+        p.schema_params(json!({ "table": table, "pk_map": pk_map })),
+    )
+}
+
+fn delete_error(p: &mut Plugin, table: &str, pk_map: Value) -> String {
+    let resp = delete(p, table, pk_map);
+    resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error: {resp}"))
+        .to_string()
+}
+
+fn count(p: &mut Plugin, table: &str, condition: &str) -> i64 {
+    p.query_ok(
+        &format!("SELECT COUNT(*) FROM TEST_SCHEMA.{table} WHERE {condition}"),
+        Value::Null,
+        1,
+    )["rows"][0][0]
+        .as_i64()
+        .unwrap()
+}
+
+#[test]
+fn test_delete_record_by_primary_key() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 920 AND 929",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.CRUD_TEST (ID, NAME) VALUES (920, 'a'), (921, 'b'), (922, 'c'), (923, 'd')",
+        Value::Null,
+        1,
+    );
+
+    // A single-column key, as a number and as the text the grid may send.
+    let resp = delete(&mut p, "CRUD_TEST", json!({ "ID": 920 }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let resp = delete(&mut p, "CRUD_TEST", json!({ "ID": "921" }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+
+    // The single key pair Tabularis sent before `pk_map` existed.
+    let resp = p.call(
+        "delete_record",
+        p.schema_params(json!({ "table": "CRUD_TEST", "pk_col": "ID", "pk_val": 922 })),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+
+    // Only the rows asked for are gone.
+    let left = p.query_ok(
+        "SELECT ID FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 920 AND 929",
+        Value::Null,
+        1,
+    );
+    assert_eq!(left["rows"], json!([[923]]));
+    delete(&mut p, "CRUD_TEST", json!({ "ID": 923 }));
+
+    // Composite primary key: both columns identify the row.
+    let before = count(&mut p, "EMP_PROJECTS", "1 = 1");
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.EMP_PROJECTS (EMP_ID, PROJECT_ID, ROLE) VALUES (5, 3, 'TMP')",
+        Value::Null,
+        1,
+    );
+    let resp = delete(
+        &mut p,
+        "EMP_PROJECTS",
+        json!({ "EMP_ID": 5, "PROJECT_ID": 3 }),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(count(&mut p, "EMP_PROJECTS", "1 = 1"), before);
+    assert_eq!(
+        count(&mut p, "EMP_PROJECTS", "PROJECT_ID = 3"),
+        1,
+        "the other row of project 3 stays"
+    );
+
+    // Delimited names in the schema, the table and the key.
+    p.query_ok(
+        "INSERT INTO \"Mixed Case\".\"Order Details\" (\"Order Id\", \"Unit Price\") VALUES (9, 1)",
+        Value::Null,
+        1,
+    );
+    let resp = p.call(
+        "delete_record",
+        p.params_in(
+            "Mixed Case",
+            json!({ "table": "Order Details", "pk_map": { "Order Id": 9 } }),
+        ),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+}
+
+#[test]
+fn test_delete_record_table_without_primary_key() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let rows = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT CODE, QTY FROM TEST_SCHEMA.KEYLESS_TEST ORDER BY CODE, QTY",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    assert_eq!(
+        rows(&mut p),
+        json!([["A", 1], ["A", 1], ["B", null], ["C", 3]])
+    );
+
+    // Two identical rows: deleting "the row" removes one of them.
+    let twin = json!({ "CODE": "A", "QTY": 1, "NOTE": "first", "CREATED": "2024-01-01" });
+    let resp = delete(&mut p, "KEYLESS_TEST", twin.clone());
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(rows(&mut p), json!([["A", 1], ["B", null], ["C", 3]]));
+
+    // A row identified partly by NULLs.
+    let nulls = json!({ "CODE": "B", "QTY": null, "NOTE": null, "CREATED": null });
+    let resp = delete(&mut p, "KEYLESS_TEST", nulls);
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(rows(&mut p), json!([["A", 1], ["C", 3]]));
+
+    // Without key values nothing is deleted.
+    let message = delete_error(&mut p, "KEYLESS_TEST", json!({}));
+    assert!(
+        message.starts_with("Cannot identify the row in \"TEST_SCHEMA\".\"KEYLESS_TEST\""),
+        "{message}"
+    );
+    assert_eq!(rows(&mut p), json!([["A", 1], ["C", 3]]));
+
+    // Restore the fixture rows.
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('A', 1, 'first', '2024-01-01'), ('B', NULL, NULL, NULL)",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        rows(&mut p),
+        json!([["A", 1], ["A", 1], ["B", null], ["C", 3]])
+    );
+}
+
+#[test]
+fn test_delete_record_foreign_keys() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // ON DELETE RESTRICT: a parent that still has children cannot go, and
+    // Db2 names the constraint.
+    let message = delete_error(&mut p, "FK_PARENT", json!({ "ID": 1 }));
+    assert!(message.starts_with("SQL0532N"), "{message}");
+    assert!(
+        message.contains("TEST_SCHEMA.FK_CHILD.FK_CHILD_PARENT"),
+        "{message}"
+    );
+    assert!(message.ends_with("SQLSTATE=23001"), "{message}");
+    assert_eq!(count(&mut p, "FK_PARENT", "ID = 1"), 1, "parent kept");
+    assert_eq!(
+        count(&mut p, "FK_CHILD", "PARENT_ID = 1"),
+        2,
+        "children kept"
+    );
+
+    // A parent without children can.
+    let resp = delete(&mut p, "FK_PARENT", json!({ "ID": 2 }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_PARENT (ID, NAME) VALUES (2, 'no children')",
+        Value::Null,
+        1,
+    );
+
+    // Once its children are deleted, so can the first one.
+    for child in [10, 11] {
+        let resp = delete(&mut p, "FK_CHILD", json!({ "ID": child }));
+        assert_eq!(resp["result"], json!(1), "{resp}");
+    }
+    let resp = delete(&mut p, "FK_PARENT", json!({ "ID": 1 }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_PARENT (ID, NAME) VALUES (1, 'has children')",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_CHILD (ID, PARENT_ID) VALUES (10, 1), (11, 1)",
+        Value::Null,
+        1,
+    );
+
+    // ON DELETE CASCADE and SET NULL: the delete succeeds and Db2 applies
+    // the rule to the dependent rows.
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.DEPARTMENTS (DEPT_NAME) VALUES ('Temp dept')",
+        Value::Null,
+        1,
+    );
+    let dept = p.query_ok(
+        "SELECT DEPT_ID FROM TEST_SCHEMA.DEPARTMENTS WHERE DEPT_NAME = 'Temp dept'",
+        Value::Null,
+        1,
+    )["rows"][0][0]
+        .as_i64()
+        .unwrap();
+    p.query_ok(
+        &format!("INSERT INTO TEST_SCHEMA.PROJECTS (PROJECT_NAME, DEPT_ID) VALUES ('Temp project', {dept})"),
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        &format!("INSERT INTO TEST_SCHEMA.EMPLOYEES (FIRST_NAME, LAST_NAME, EMAIL, HIRE_DATE, DEPT_ID) VALUES ('Temp', 'Person', 'temp.person@example.com', '2024-01-01', {dept})"),
+        Value::Null,
+        1,
+    );
+
+    let resp = delete(&mut p, "DEPARTMENTS", json!({ "DEPT_ID": dept }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(
+        count(&mut p, "PROJECTS", "PROJECT_NAME = 'Temp project'"),
+        0,
+        "cascade"
+    );
+    assert_eq!(
+        count(
+            &mut p,
+            "EMPLOYEES",
+            "EMAIL = 'temp.person@example.com' AND DEPT_ID IS NULL"
+        ),
+        1,
+        "set null"
+    );
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.EMPLOYEES WHERE EMAIL = 'temp.person@example.com'",
+        Value::Null,
+        1,
+    );
+    assert_eq!(count(&mut p, "EMPLOYEES", "1 = 1"), 6);
+    assert_eq!(count(&mut p, "DEPARTMENTS", "1 = 1"), 4);
+}
+
+#[test]
+fn test_delete_record_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let before = count(&mut p, "EMPLOYEES", "1 = 1");
+
+    // A key that matches no row: the row is already gone.
+    assert_eq!(
+        delete_error(&mut p, "EMPLOYEES", json!({ "EMP_ID": 424242 })),
+        "No row in \"TEST_SCHEMA\".\"EMPLOYEES\" matches the key values: it was changed or \
+         deleted after it was loaded. Refresh the table and try again."
+    );
+
+    // No key values, in every shape that can arrive.
+    for keys in [json!({}), Value::Null, json!({ "": 1 })] {
+        let message = delete_error(&mut p, "EMPLOYEES", keys);
+        assert!(message.starts_with("Cannot identify the row"), "{message}");
+    }
+    let resp = p.call(
+        "delete_record",
+        p.schema_params(json!({ "table": "EMPLOYEES", "pk_col": "", "pk_val": null })),
+    );
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Cannot identify the row"));
+
+    // A key value that is not what its column holds never reaches Db2 as SQL.
+    assert_eq!(
+        delete_error(&mut p, "EMPLOYEES", json!({ "EMP_ID": "1 OR 1=1" })),
+        "'1 OR 1=1' is not a valid number for column \"EMP_ID\""
+    );
+    // In a text key it is just text that matches nothing.
+    let message = delete_error(&mut p, "EMPLOYEES", json!({ "EMAIL": "' OR '1'='1" }));
+    assert!(message.starts_with("No row in"), "{message}");
+
+    // Unknown key column, unknown table, missing table argument.
+    let column = delete_error(&mut p, "EMPLOYEES", json!({ "NOPE": 1 }));
+    assert!(column.starts_with("SQL0206N \"NOPE\""), "{column}");
+    let table = delete_error(&mut p, "NOPE_TABLE", json!({ "ID": 1 }));
+    assert!(
+        table.starts_with("SQL0204N \"TEST_SCHEMA.NOPE_TABLE\""),
+        "{table}"
+    );
+    let resp = p.call(
+        "delete_record",
+        p.schema_params(json!({ "pk_map": { "ID": 1 } })),
+    );
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    assert_eq!(
+        count(&mut p, "EMPLOYEES", "1 = 1"),
+        before,
+        "nothing was deleted"
     );
 }
 

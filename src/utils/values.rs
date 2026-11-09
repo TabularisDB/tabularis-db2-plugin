@@ -6,22 +6,6 @@ pub fn string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-pub fn json_to_sql_literal(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Bool(flag) => {
-            if *flag {
-                "1".to_string()
-            } else {
-                "0".to_string()
-            }
-        }
-        Value::Number(number) => number.to_string(),
-        Value::String(string) => string_literal(string),
-        Value::Array(_) | Value::Object(_) => string_literal(&value.to_string()),
-    }
-}
-
 /// Converts the text Db2 rendered for a cell into the JSON value Tabularis
 /// gets, according to the column's kind.
 ///
@@ -54,16 +38,9 @@ pub fn cell_to_json(value: Option<&str>, kind: ColumnKind) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell_to_json, json_to_sql_literal, string_literal};
+    use super::{cell_to_json, string_literal};
     use crate::client::ColumnKind;
     use serde_json::json;
-
-    #[test]
-    fn serializes_sql_literals() {
-        assert_eq!(json_to_sql_literal(&json!(null)), "NULL");
-        assert_eq!(json_to_sql_literal(&json!(true)), "1");
-        assert_eq!(json_to_sql_literal(&json!("O'Reilly")), "'O''Reilly'");
-    }
 
     #[test]
     fn quotes_string_constants() {
