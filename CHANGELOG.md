@@ -80,8 +80,31 @@ All notable changes to this project will be documented in this file.
     server time with `SELECT NOW()`, which Db2 rejects without a `FROM`, so
     that exact statement is answered with `VALUES CURRENT TIMESTAMP`.
 
+- Inserting records, verified against Db2 12.1 and Tabularis 0.32.0 (#3):
+  - Values are written for the type of their column instead of as quoted
+    or bare text taken from the JSON type. A number typed in the grid
+    (which arrives as a string) is validated and written as a number, and
+    anything that is not a number is refused with `'abc' is not a valid
+    number for column "ID"` before it reaches Db2. Booleans accept the
+    usual spellings; a cleared numeric, date or boolean cell is `NULL`.
+  - Text and binary data are bound as parameters, so a CLOB longer than
+    the 32,672 bytes a string constant may hold can be inserted, and no
+    value is ever spliced into the statement.
+  - BLOBs work: an inline value, a file picked or uploaded in Tabularis
+    (read from disk, within the host's size limit) and hexadecimal text for
+    `BINARY`, `VARBINARY` and `FOR BIT DATA` columns. A truncated preview
+    of a large BLOB is refused rather than written back over the value.
+  - "Use the default" inserts `DEFAULT`, and a row with no values at all is
+    inserted from the column defaults.
+  - The number of inserted rows is returned (it was always 0).
+  - A `NOT NULL` violation names the column: Db2 reports it as
+    `"TBSPACEID=2, TABLEID=9, COLNO=0"`.
+
 ### Added
 
+- `fetch_blob_as_data_url` and `save_blob_to_file`: the whole value of a
+  binary column, for the preview in the row editor and for export (a query
+  result only carries the first 10,240 bytes).
 - `execute_query_batch`: a script's statements run in order on one
   connection, so session state set by one statement (`SET CURRENT SCHEMA`,
   for instance) is seen by the next. Tabularis previously fell back to one

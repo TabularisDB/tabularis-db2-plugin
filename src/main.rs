@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead};
+use utils::binding::DEFAULT_MAX_BLOB_SIZE;
 
 /// The arguments of one JSON-RPC request, with the plugin settings needed to
 /// act on them.
@@ -111,6 +112,23 @@ impl Request<'_> {
                     .map(ToString::to_string)
                     .collect()
             })
+    }
+
+    /// A JSON object argument (`data`, `pk_map`); a missing one is empty.
+    fn map(&self, key: &str) -> Result<HashMap<String, Value>, RpcError> {
+        match self.params.get(key) {
+            None | Some(Value::Null) => Ok(HashMap::new()),
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|error| RpcError::invalid_params(format!("Invalid '{key}': {error}"))),
+        }
+    }
+
+    /// Largest BLOB the host allows in a write, from its settings.
+    fn max_blob_size(&self) -> u64 {
+        self.params
+            .get("max_blob_size")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_MAX_BLOB_SIZE)
     }
 
     fn u32(&self, keys: &[&str]) -> Option<u32> {
@@ -256,19 +274,33 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         // -- Records ---------------------------------------------------------
         "insert_record" => {
             let (session, schema) = request.schema_session()?;
-            let data: HashMap<String, Value> = serde_json::from_value(
-                request
-                    .params
-                    .get("data")
-                    .cloned()
-                    .unwrap_or_else(|| json!({})),
-            )
-            .map_err(|error| RpcError::invalid_params(format!("Invalid 'data': {error}")))?;
             reply(crud::insert_record(
                 &session,
                 request.required(&["table"])?,
-                &data,
-                Some(&schema),
+                &request.map("data")?,
+                &schema,
+                request.max_blob_size(),
+            ))
+        }
+        "fetch_blob_as_data_url" => {
+            let (session, schema) = request.schema_session()?;
+            reply(crud::fetch_blob_as_data_url(
+                &session,
+                request.required(&["table"])?,
+                request.required(&["col_name"])?,
+                &request.map("pk_map")?,
+                &schema,
+            ))
+        }
+        "save_blob_to_file" => {
+            let (session, schema) = request.schema_session()?;
+            reply(crud::save_blob_to_file(
+                &session,
+                request.required(&["table"])?,
+                request.required(&["col_name"])?,
+                &request.map("pk_map")?,
+                &schema,
+                request.required(&["file_path"])?,
             ))
         }
         "update_record" => {

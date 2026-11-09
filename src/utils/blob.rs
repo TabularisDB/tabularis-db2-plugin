@@ -19,9 +19,24 @@ pub fn encode_blob_preview(preview: &[u8], total_size: usize) -> String {
     format!("BLOB:{total_size}:{mime_type}:{}", STANDARD.encode(preview))
 }
 
+/// Encodes a whole binary value in the host's blob wire format, for the
+/// preview and export paths, which must not lose bytes.
+pub fn encode_blob_full(data: &[u8]) -> String {
+    encode_blob_preview(data, data.len())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::encode_blob_preview;
+    use super::{encode_blob_full, encode_blob_preview};
+
+    #[test]
+    fn a_full_blob_carries_every_byte() {
+        let data = vec![7u8; 30_000];
+        let wire = encode_blob_full(&data);
+        let prefix = "BLOB:30000:application/octet-stream:";
+        assert!(wire.starts_with(prefix));
+        assert_eq!(wire.len() - prefix.len(), 40_000);
+    }
 
     #[test]
     fn encodes_bytes_with_their_size() {

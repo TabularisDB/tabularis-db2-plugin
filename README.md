@@ -64,7 +64,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Read table data | Verified | — |
 | Schema & object browsing | Verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
 | Query execution | Verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
-| Insert record | Not yet verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
+| Insert record | Verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
 | Update record | Not yet verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
 | Delete record | Not yet verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
 | DDL generation | Not yet verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
@@ -176,7 +176,8 @@ The code is intentionally split by responsibility:
 | `execute_query` | Runs one statement. A result set (`SELECT`, `WITH`, `VALUES`, `CALL`) is paged on the cursor and returned with typed values; anything else returns the number of rows it changed |
 | `execute_query_batch` | Runs the statements of a script in order on one connection, reporting each one's result or error |
 | `explain_query` | Returns the DB2 execution plan tree by reading explain tables |
-| `insert_record` | Inserts a row |
+| `insert_record` | Inserts a row, rendering each value for its column type (numbers validated, text and binary data bound as parameters, `NULL`, column defaults, BLOB uploads) |
+| `fetch_blob_as_data_url` / `save_blob_to_file` | Read the whole value of a binary column for the preview and for export |
 | `update_record` | Updates a row by primary key column |
 | `delete_record` | Deletes a row by primary key column |
 | `get_schema_snapshot` | Returns all tables with columns and foreign keys |
