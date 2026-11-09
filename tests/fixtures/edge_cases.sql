@@ -100,3 +100,21 @@ CREATE TABLE TEST_SCHEMA.PAGING_TEST (
 INSERT INTO TEST_SCHEMA.PAGING_TEST (N, LABEL)
     WITH SEQ (N) AS (VALUES 1 UNION ALL SELECT N + 1 FROM SEQ WHERE N < 1200)
     SELECT N, 'row ' || N FROM SEQ;
+
+-- ---------------------------------------------------------
+-- A table without a primary key or unique index, holding two
+-- identical rows, NULLs and a LOB: rows can only be told apart
+-- by the values of all their columns.
+-- ---------------------------------------------------------
+
+CREATE TABLE TEST_SCHEMA.KEYLESS_TEST (
+    CODE VARCHAR(10),
+    QTY INTEGER,
+    NOTE CLOB(1K),
+    CREATED DATE
+);
+
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('A', 1, 'first', '2024-01-01');
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('A', 1, 'first', '2024-01-01');
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('B', NULL, NULL, NULL);
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('C', 3, 'third', '2024-03-03');

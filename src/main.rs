@@ -123,6 +123,19 @@ impl Request<'_> {
         }
     }
 
+    /// The key values that identify a row: `pk_map`, or the single
+    /// `pk_col` / `pk_val` pair Tabularis sent before 0.13.4.
+    fn row_keys(&self) -> Result<HashMap<String, Value>, RpcError> {
+        let mut keys = self.map("pk_map")?;
+        if keys.is_empty() {
+            if let Some(column) = self.text(&["pk_col"]) {
+                let value = self.params.get("pk_val").cloned().unwrap_or(Value::Null);
+                keys.insert(column.to_string(), value);
+            }
+        }
+        Ok(keys)
+    }
+
     /// Largest BLOB the host allows in a write, from its settings.
     fn max_blob_size(&self) -> u64 {
         self.params
@@ -308,11 +321,11 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             reply(crud::update_record(
                 &session,
                 request.required(&["table"])?,
-                request.text(&["pk_col"]).unwrap_or_default(),
-                request.params.get("pk_val").unwrap_or(&Value::Null),
-                request.text(&["col_name"]).unwrap_or_default(),
+                &request.row_keys()?,
+                request.required(&["col_name"])?,
                 request.params.get("new_val").unwrap_or(&Value::Null),
-                Some(&schema),
+                &schema,
+                request.max_blob_size(),
             ))
         }
         "delete_record" => {

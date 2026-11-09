@@ -1624,8 +1624,7 @@ fn test_crud_insert_update_delete() {
         "update_record",
         p.schema_params(json!({
             "table": "CRUD_TEST",
-            "pk_col": "ID",
-            "pk_val": 100,
+            "pk_map": { "ID": 100 },
             "col_name": "NAME",
             "new_val": "Updated Record"
         })),
@@ -2130,6 +2129,432 @@ fn test_insert_record_constraint_violations() {
         "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
         Value::Null,
         1,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Update record
+// ---------------------------------------------------------------------------
+
+/// `update_record` in TEST_SCHEMA; returns the raw response.
+fn update(p: &mut Plugin, table: &str, pk_map: Value, column: &str, value: Value) -> Value {
+    p.call(
+        "update_record",
+        p.schema_params(json!({
+            "table": table, "pk_map": pk_map, "col_name": column, "new_val": value
+        })),
+    )
+}
+
+fn update_error(p: &mut Plugin, table: &str, pk_map: Value, column: &str, value: Value) -> String {
+    let resp = update(p, table, pk_map, column, value);
+    resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error: {resp}"))
+        .to_string()
+}
+
+#[test]
+fn test_update_record_all_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST", "data": { "ID": 1010 } })),
+    );
+
+    // One column at a time, as the grid does, each value as typed text.
+    for (column, value) in [
+        ("COL_CHAR", json!("upd")),
+        ("COL_VARCHAR", json!("O'Brien — 所有")),
+        ("COL_BIT_DATA", json!("0A0B0C")),
+        ("COL_GRAPHIC", json!("グラ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!("-5")),
+        ("COL_INTEGER", json!("123456")),
+        ("COL_DECIMAL", json!("99.9900")),
+        ("COL_DECFLOAT16", json!("2.5")),
+        ("COL_DECFLOAT34", json!("0.000000000000000000001")),
+        ("COL_REAL", json!("2.5")),
+        ("COL_DOUBLE", json!("-0.125")),
+        ("COL_BOOLEAN", json!("true")),
+        ("COL_DATE", json!("2025-12-31")),
+        ("COL_TIME", json!("23:59:59")),
+        ("COL_TIMESTAMP", json!("2025-12-31T23:59:59.999999")),
+        ("COL_TIMESTAMP12", json!("2025-12-31 23:59:59.999999999999")),
+        ("COL_CLOB", json!("x".repeat(40_000))),
+        ("COL_DBCLOB", json!("文本")),
+        ("COL_BLOB", json!("BLOB:3:application/octet-stream:AQID")),
+        ("COL_BINARY", json!("FFEEDDCCBBAA99887766554433221100")),
+        ("COL_VARBINARY", json!("00FF")),
+        ("COL_XML", json!("<doc id=\"1\"/>")),
+    ] {
+        let resp = update(
+            &mut p,
+            "TYPE_METADATA_TEST",
+            json!({ "ID": 1010 }),
+            column,
+            value,
+        );
+        assert_eq!(resp["result"], json!(1), "{column}: {resp}");
+    }
+
+    let row = type_row(&mut p, 1010);
+    for (name, expected) in [
+        ("COL_CHAR", json!("upd       ")),
+        ("COL_VARCHAR", json!("O'Brien — 所有")),
+        ("COL_BIT_DATA", json!("0A0B0C")),
+        ("COL_GRAPHIC", json!("グラ  ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!(-5)),
+        ("COL_INTEGER", json!(123456)),
+        ("COL_DECIMAL", json!("99.9900")),
+        ("COL_DECFLOAT16", json!("2.5")),
+        ("COL_DECFLOAT34", json!("1E-21")),
+        ("COL_REAL", json!(2.5)),
+        ("COL_DOUBLE", json!(-0.125)),
+        ("COL_BOOLEAN", json!(true)),
+        ("COL_DATE", json!("2025-12-31")),
+        ("COL_TIME", json!("23:59:59")),
+        ("COL_TIMESTAMP", json!("2025-12-31 23:59:59.999999")),
+        ("COL_TIMESTAMP12", json!("2025-12-31 23:59:59.999999999999")),
+        ("COL_CLOB", json!("x".repeat(40_000))),
+        ("COL_DBCLOB", json!("文本")),
+        ("COL_BLOB", json!("BLOB:3:application/octet-stream:AQID")),
+        ("COL_BINARY", json!("FFEEDDCCBBAA99887766554433221100")),
+        ("COL_VARBINARY", json!("00FF")),
+        // Recomputed by Db2 from the new COL_VARCHAR (its length in bytes).
+        ("COL_COMPUTED", json!(18)),
+    ] {
+        assert_eq!(row[name], expected, "{name}");
+    }
+    assert!(row["COL_XML"]
+        .as_str()
+        .unwrap()
+        .ends_with("<doc id=\"1\"/>"));
+
+    // NULL, the column default, and a cleared numeric cell.
+    for (column, value, expected) in [
+        ("COL_VARCHAR", Value::Null, Value::Null),
+        ("COL_BLOB", Value::Null, Value::Null),
+        ("COL_CHAR", json!("__USE_DEFAULT__"), json!("N/A       ")),
+        ("COL_SMALLINT", json!("__USE_DEFAULT__"), json!(1)),
+        ("COL_INTEGER", json!(""), Value::Null),
+        ("COL_DATE", json!(""), Value::Null),
+    ] {
+        let resp = update(
+            &mut p,
+            "TYPE_METADATA_TEST",
+            json!({ "ID": 1010 }),
+            column,
+            value,
+        );
+        assert_eq!(resp["result"], json!(1), "{column}: {resp}");
+        assert_eq!(type_row(&mut p, 1010)[column], expected, "{column}");
+    }
+
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_update_record_keys() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Composite primary key: both columns identify the row.
+    let role = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT EMP_ID, PROJECT_ID, ROLE FROM TEST_SCHEMA.EMP_PROJECTS ORDER BY EMP_ID, PROJECT_ID",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    let before = role(&mut p);
+    let resp = update(
+        &mut p,
+        "EMP_PROJECTS",
+        json!({ "EMP_ID": 1, "PROJECT_ID": 2 }),
+        "ROLE",
+        json!("OWNER"),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let after = role(&mut p);
+    let changed: Vec<_> = before
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(after.as_array().unwrap())
+        .filter(|(old, new)| old != new)
+        .collect();
+    assert_eq!(changed.len(), 1, "exactly one row changed");
+    assert_eq!(changed[0].1, &json!([1, 2, "OWNER"]));
+    update(
+        &mut p,
+        "EMP_PROJECTS",
+        json!({ "EMP_ID": 1, "PROJECT_ID": 2 }),
+        "ROLE",
+        json!("MEMBER"),
+    );
+    assert_eq!(role(&mut p), before);
+
+    // Key values arrive as shown in the grid: a number as text works too.
+    let resp = update(
+        &mut p,
+        "DEPARTMENTS",
+        json!({ "DEPT_ID": "4" }),
+        "LOCATION",
+        json!("Building Z"),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    update(
+        &mut p,
+        "DEPARTMENTS",
+        json!({ "DEPT_ID": 4 }),
+        "LOCATION",
+        json!("Building A"),
+    );
+
+    // The single key pair Tabularis sent before `pk_map` existed.
+    let resp = p.call(
+        "update_record",
+        p.schema_params(json!({
+            "table": "DEPARTMENTS", "pk_col": "DEPT_ID", "pk_val": 4,
+            "col_name": "LOCATION", "new_val": "Building A"
+        })),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+
+    // Changing the key column itself.
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID IN (910, 911)",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.CRUD_TEST (ID, NAME) VALUES (910, 'moved')",
+        Value::Null,
+        1,
+    );
+    let resp = update(&mut p, "CRUD_TEST", json!({ "ID": 910 }), "ID", json!(911));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let moved = p.query_ok(
+        "SELECT ID FROM TEST_SCHEMA.CRUD_TEST WHERE NAME = 'moved'",
+        Value::Null,
+        1,
+    );
+    assert_eq!(moved["rows"], json!([[911]]));
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID IN (910, 911)",
+        Value::Null,
+        1,
+    );
+
+    // Delimited names in the table, the key and the column.
+    let resp = p.call(
+        "update_record",
+        p.params_in(
+            "Mixed Case",
+            json!({
+                "table": "Order Details", "pk_map": { "Order Id": 1 },
+                "col_name": "O'Brien", "new_val": "it's \"quoted\""
+            }),
+        ),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let row = p.query_ok(
+        "SELECT \"O'Brien\" FROM \"Mixed Case\".\"Order Details\" WHERE \"Order Id\" = 1",
+        Value::Null,
+        1,
+    );
+    assert_eq!(row["rows"], json!([["it's \"quoted\""]]));
+    p.call_ok(
+        "update_record",
+        p.params_in(
+            "Mixed Case",
+            json!({
+                "table": "Order Details", "pk_map": { "Order Id": 1 },
+                "col_name": "O'Brien", "new_val": "it's"
+            }),
+        ),
+    );
+}
+
+#[test]
+fn test_update_record_table_without_primary_key() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let rows = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT CODE, QTY, CAST(NOTE AS VARCHAR(100)), CREATED FROM TEST_SCHEMA.KEYLESS_TEST ORDER BY CODE, QTY",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    let original = rows(&mut p);
+    assert_eq!(
+        original,
+        json!([
+            ["A", 1, "first", "2024-01-01"],
+            ["A", 1, "first", "2024-01-01"],
+            ["B", null, null, null],
+            ["C", 3, "third", "2024-03-03"]
+        ])
+    );
+
+    // Without any key the row cannot be identified: a clear error instead
+    // of the invalid `WHERE "" = ...` this used to generate (issue #4).
+    for keys in [json!({}), Value::Null] {
+        let message = update_error(&mut p, "KEYLESS_TEST", keys, "QTY", json!(5));
+        assert_eq!(
+            message,
+            "Cannot identify the row in \"TEST_SCHEMA\".\"KEYLESS_TEST\": no key values were \
+             provided. The table needs a primary key, or every column of the row must be loaded."
+        );
+    }
+    let resp = p.call(
+        "update_record",
+        p.schema_params(json!({
+            "table": "KEYLESS_TEST", "pk_col": "", "pk_val": null, "col_name": "QTY", "new_val": 5
+        })),
+    );
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Cannot identify the row"));
+    assert_eq!(rows(&mut p), original, "nothing changed");
+
+    // What Tabularis sends for a keyless table: every column of the row.
+    // Two rows are identical; only one of them is updated. The CLOB is not
+    // comparable and is left out of the match.
+    let twin = json!({ "CODE": "A", "QTY": 1, "NOTE": "first", "CREATED": "2024-01-01" });
+    let resp = update(&mut p, "KEYLESS_TEST", twin.clone(), "QTY", json!("10"));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(
+        rows(&mut p),
+        json!([
+            ["A", 1, "first", "2024-01-01"],
+            ["A", 10, "first", "2024-01-01"],
+            ["B", null, null, null],
+            ["C", 3, "third", "2024-03-03"]
+        ])
+    );
+
+    // NULL key values are matched with IS NULL.
+    let nulls = json!({ "CODE": "B", "QTY": null, "NOTE": null, "CREATED": null });
+    let resp = update(&mut p, "KEYLESS_TEST", nulls, "NOTE", json!("filled in"));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(rows(&mut p)[2], json!(["B", null, "filled in", null]));
+
+    // Restore the fixture rows.
+    let changed = json!({ "CODE": "A", "QTY": 10, "NOTE": "first", "CREATED": "2024-01-01" });
+    update(&mut p, "KEYLESS_TEST", changed, "QTY", json!(1));
+    let filled = json!({ "CODE": "B", "QTY": null, "CREATED": null });
+    update(&mut p, "KEYLESS_TEST", filled, "NOTE", Value::Null);
+    assert_eq!(rows(&mut p), original);
+}
+
+#[test]
+fn test_update_record_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let employee = json!({ "EMP_ID": 1 });
+    let snapshot = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT * FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    let before = snapshot(&mut p);
+
+    // A key that matches no row.
+    assert_eq!(
+        update_error(
+            &mut p,
+            "EMPLOYEES",
+            json!({ "EMP_ID": 424242 }),
+            "LAST_NAME",
+            json!("x")
+        ),
+        "No row in \"TEST_SCHEMA\".\"EMPLOYEES\" matches the key values: it was changed or \
+         deleted after it was loaded. Refresh the table and try again."
+    );
+
+    // Constraint violations, each with Db2's message.
+    let foreign = update_error(&mut p, "EMPLOYEES", employee.clone(), "DEPT_ID", json!(999));
+    assert!(foreign.starts_with("SQL0530N"), "{foreign}");
+    assert!(foreign.contains("FK_EMP_DEPT"), "{foreign}");
+
+    let unique = update_error(
+        &mut p,
+        "EMPLOYEES",
+        employee.clone(),
+        "EMAIL",
+        json!("jane.smith@example.com"),
+    );
+    assert!(unique.starts_with("SQL0803N"), "{unique}");
+
+    assert_eq!(
+        update_error(&mut p, "EMPLOYEES", employee.clone(), "LAST_NAME", Value::Null),
+        "SQL0407N Assignment of a NULL value to a NOT NULL column \"LAST_NAME\" is not allowed. SQLSTATE=23502"
+    );
+
+    let long = update_error(
+        &mut p,
+        "EMPLOYEES",
+        employee.clone(),
+        "FIRST_NAME",
+        json!("x".repeat(60)),
+    );
+    assert!(long.contains("SQLSTATE=22001"), "{long}");
+
+    // Values that are refused before reaching Db2.
+    assert_eq!(
+        update_error(
+            &mut p,
+            "EMPLOYEES",
+            employee.clone(),
+            "SALARY",
+            json!("lots")
+        ),
+        "'lots' is not a valid number for column \"SALARY\""
+    );
+    assert_eq!(
+        update_error(
+            &mut p,
+            "EMPLOYEES",
+            json!({ "EMP_ID": "1 OR 1=1" }),
+            "SALARY",
+            json!(1)
+        ),
+        "'1 OR 1=1' is not a valid number for column \"EMP_ID\""
+    );
+
+    let generated = update_error(&mut p, "EMPLOYEES", employee.clone(), "EMP_ID", json!(50));
+    assert!(generated.starts_with("SQL0798N"), "{generated}");
+    let column = update_error(&mut p, "EMPLOYEES", employee.clone(), "NOPE", json!(1));
+    assert!(column.starts_with("SQL0206N \"NOPE\""), "{column}");
+    let table = update_error(&mut p, "NOPE_TABLE", json!({ "ID": 1 }), "X", json!(1));
+    assert!(
+        table.starts_with("SQL0204N \"TEST_SCHEMA.NOPE_TABLE\""),
+        "{table}"
+    );
+
+    // Missing arguments are invalid requests.
+    let resp = p.call(
+        "update_record",
+        p.schema_params(json!({ "table": "EMPLOYEES", "pk_map": employee, "new_val": 1 })),
+    );
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    assert_eq!(
+        snapshot(&mut p),
+        before,
+        "no failed update changed anything"
     );
 }
 
