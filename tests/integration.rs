@@ -670,14 +670,24 @@ fn test_get_views() {
     let result = p.call_ok("get_views", p.schema_params(json!({})));
     let views = result.as_array().expect("expected array");
     let names: Vec<&str> = views.iter().filter_map(|v| v["name"].as_str()).collect();
+    // Every view of the schema, sorted, and nothing that is not a view.
+    assert_eq!(names, ["V_DEPT_SUMMARY", "V_EMP_DETAILS"]);
 
-    assert!(
-        names.contains(&"V_EMP_DETAILS"),
-        "V_EMP_DETAILS not found in: {names:?}"
-    );
-    assert!(
-        names.contains(&"V_DEPT_SUMMARY"),
-        "V_DEPT_SUMMARY not found in: {names:?}"
+    // The definition is the view's query, without the CREATE VIEW in front.
+    for view in views {
+        let definition = view["definition"].as_str().expect("definition");
+        assert!(definition.starts_with("SELECT"), "{definition}");
+    }
+
+    // A schema without views, and one with delimited names.
+    let none = p.call_ok("get_views", p.params_in("EMPTY_SCHEMA", json!({})));
+    assert_eq!(none, json!([]));
+    let mixed = p.call_ok("get_views", p.params_in("Mixed Case", json!({})));
+    assert_eq!(mixed.as_array().unwrap().len(), 1);
+    assert_eq!(mixed[0]["name"], json!("Cheap Orders"));
+    assert_eq!(
+        mixed[0]["definition"],
+        json!("SELECT \"Order Id\", \"Unit Price\" FROM \"Mixed Case\".\"Order Details\" WHERE \"Unit Price\" < 10")
     );
 }
 
@@ -686,17 +696,57 @@ fn test_get_view_definition() {
     require_db2!();
     let mut p = Plugin::spawn();
 
+    // The query as Db2 stored it (the command line processor that loads the
+    // fixtures joins the lines), without the CREATE VIEW in front.
     let result = p.call_ok(
         "get_view_definition",
         p.schema_params(json!({ "view_name": "V_EMP_DETAILS" })),
     );
-    let definition = result.as_str().expect("expected string");
-    // DB2 stores view definitions in upper case or as-is
-    let upper = definition.to_uppercase();
-    assert!(
-        upper.contains("EMPLOYEES") && upper.contains("DEPARTMENTS"),
-        "view definition should reference EMPLOYEES and DEPARTMENTS: {definition}"
+    assert_eq!(
+        result,
+        json!(
+            "SELECT e.EMP_ID, e.FIRST_NAME, e.LAST_NAME, e.EMAIL, e.HIRE_DATE, e.SALARY, \
+             d.DEPT_NAME, d.LOCATION FROM TEST_SCHEMA.EMPLOYEES e LEFT JOIN \
+             TEST_SCHEMA.DEPARTMENTS d ON e.DEPT_ID = d.DEPT_ID"
+        )
     );
+
+    // The definition is itself a query that returns what the view returns.
+    let definition = result.as_str().unwrap().to_string();
+    let from_definition = p.query_ok(&definition, Value::Null, 1);
+    let from_view = p.query_ok("SELECT * FROM TEST_SCHEMA.V_EMP_DETAILS", Value::Null, 1);
+    assert_eq!(from_definition["columns"], from_view["columns"]);
+    assert_eq!(
+        from_definition["rows"].as_array().unwrap().len(),
+        from_view["rows"].as_array().unwrap().len()
+    );
+
+    // Both spellings of the argument, and the errors.
+    let by_guide_name = p.call_ok(
+        "get_view_definition",
+        p.schema_params(json!({ "view": "V_DEPT_SUMMARY" })),
+    );
+    assert!(by_guide_name
+        .as_str()
+        .unwrap()
+        .contains("COUNT(e.EMP_ID) AS EMP_COUNT"));
+
+    let resp = p.call(
+        "get_view_definition",
+        p.schema_params(json!({ "view_name": "NOPE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("View \"TEST_SCHEMA\".\"NOPE\" was not found")
+    );
+    // A table is not a view.
+    let resp = p.call(
+        "get_view_definition",
+        p.schema_params(json!({ "view_name": "EMPLOYEES" })),
+    );
+    assert!(resp.get("error").is_some(), "{resp}");
+    let resp = p.call("get_view_definition", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
 }
 
 #[test]
@@ -708,16 +758,274 @@ fn test_get_view_columns() {
         "get_view_columns",
         p.schema_params(json!({ "view_name": "V_EMP_DETAILS" })),
     );
-    let columns = result.as_array().expect("expected array");
-    let names: Vec<&str> = columns.iter().filter_map(|c| c["name"].as_str()).collect();
+    let summary: Vec<Value> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(type_summary)
+        .collect();
+    // The columns of the view, in order, with the types of the columns they
+    // come from.
+    assert_eq!(
+        json!(summary),
+        json!([
+            ["EMP_ID", "INTEGER", null, null, null, null],
+            ["FIRST_NAME", "VARCHAR", "VARCHAR(50)", 50, null, null],
+            ["LAST_NAME", "VARCHAR", "VARCHAR(50)", 50, null, null],
+            ["EMAIL", "VARCHAR", "VARCHAR(100)", 100, null, null],
+            ["HIRE_DATE", "DATE", null, null, null, null],
+            ["SALARY", "DECIMAL", "DECIMAL(10,2)", null, 10, 2],
+            ["DEPT_NAME", "VARCHAR", "VARCHAR(100)", 100, null, null],
+            ["LOCATION", "VARCHAR", "VARCHAR(200)", 200, null, null],
+        ])
+    );
+    for column in result.as_array().unwrap() {
+        assert_eq!(column["is_pk"], json!(false), "a view has no key");
+    }
+    // An outer-joined column is nullable even though its source is not.
+    assert_eq!(result[6]["name"], json!("DEPT_NAME"));
+    assert_eq!(result[6]["is_nullable"], json!(true));
 
-    assert!(
-        names.contains(&"FIRST_NAME"),
-        "view should expose FIRST_NAME: {names:?}"
+    // They are the columns a query on the view returns.
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_EMP_DETAILS", json!(1), 1);
+    let names: Vec<&Value> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["name"])
+        .collect();
+    assert_eq!(json!(names), rows["columns"]);
+
+    // Computed columns: the types Db2 derived for them.
+    let summary = p.call_ok(
+        "get_view_columns",
+        p.schema_params(json!({ "view_name": "V_DEPT_SUMMARY" })),
+    );
+    let names: Vec<Value> = summary
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| json!([column["name"], column["data_type"]]))
+        .collect();
+    assert_eq!(
+        json!(names),
+        json!([
+            ["DEPT_ID", "INTEGER"],
+            ["DEPT_NAME", "VARCHAR"],
+            ["EMP_COUNT", "INTEGER"],
+            ["AVG_SALARY", "DECIMAL"]
+        ])
+    );
+
+    let missing = p.call_ok(
+        "get_view_columns",
+        p.schema_params(json!({ "view_name": "NOPE" })),
+    );
+    assert_eq!(missing, json!([]));
+}
+
+#[test]
+fn test_create_alter_drop_view() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    for view in ["V_TMP", "V_TMP_LIST", "V_TMP_LONG"] {
+        p.query(&format!("DROP VIEW TEST_SCHEMA.{view}"), Value::Null, 1);
+    }
+    let view_names = |p: &mut Plugin| -> Vec<String> {
+        p.call_ok("get_views", p.schema_params(json!({})))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|view| view["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let definition_of = |p: &mut Plugin, view: &str| -> String {
+        p.call_ok(
+            "get_view_definition",
+            p.schema_params(json!({ "view_name": view })),
+        )
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+
+    // Create from a query, as Tabularis's "Create New View" does.
+    let created = p.call_ok(
+        "create_view",
+        p.schema_params(json!({
+            "view_name": "V_TMP",
+            "definition": "SELECT EMP_ID, LAST_NAME FROM EMPLOYEES WHERE DEPT_ID = 1;\n"
+        })),
+    );
+    assert_eq!(created, Value::Null);
+    assert!(view_names(&mut p).contains(&"V_TMP".to_string()));
+    assert_eq!(
+        definition_of(&mut p, "V_TMP"),
+        "SELECT EMP_ID, LAST_NAME FROM EMPLOYEES WHERE DEPT_ID = 1"
+    );
+    let rows = p.query_ok(
+        "SELECT * FROM TEST_SCHEMA.V_TMP ORDER BY EMP_ID",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        rows["rows"],
+        json!([[1, "Doe"], [2, "Smith"], [4, "Williams"]])
+    );
+
+    // It already exists.
+    let resp = p.call(
+        "create_view",
+        p.schema_params(
+            json!({ "view_name": "V_TMP", "definition": "SELECT 1 AS X FROM SYSIBM.SYSDUMMY1" }),
+        ),
     );
     assert!(
-        names.contains(&"DEPT_NAME"),
-        "view should expose DEPT_NAME: {names:?}"
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("SQL0601N"),
+        "{resp}"
+    );
+
+    // Alter: what get_view_definition returned, edited and sent back.
+    let edited = definition_of(&mut p, "V_TMP").replace("DEPT_ID = 1", "DEPT_ID = 2");
+    let altered = p.call_ok(
+        "alter_view",
+        p.schema_params(json!({ "view_name": "V_TMP", "definition": edited })),
+    );
+    assert_eq!(altered, Value::Null);
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([[3, "Johnson"]]));
+    assert_eq!(
+        definition_of(&mut p, "V_TMP"),
+        "SELECT EMP_ID, LAST_NAME FROM EMPLOYEES WHERE DEPT_ID = 2"
+    );
+
+    // A view with an explicit column list keeps it when its query is edited.
+    p.query_ok(
+        "CREATE VIEW TEST_SCHEMA.V_TMP_LIST (\"Who\", HOW_MUCH) AS SELECT LAST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        definition_of(&mut p, "V_TMP_LIST"),
+        "SELECT LAST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES"
+    );
+    p.call_ok(
+        "alter_view",
+        p.schema_params(json!({
+            "view_name": "V_TMP_LIST",
+            "definition": "SELECT FIRST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES WHERE EMP_ID = 1"
+        })),
+    );
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP_LIST", Value::Null, 1);
+    assert_eq!(
+        rows["columns"],
+        json!(["Who", "HOW_MUCH"]),
+        "column names kept"
+    );
+    assert_eq!(rows["rows"], json!([["John", "75000.00"]]));
+
+    // A definition far longer than one fetch buffer comes back whole.
+    let branches: String = (0..600)
+        .map(|n| format!("WHEN EMP_ID = {n} THEN 'employee number {n}' "))
+        .collect();
+    let long_query = format!(
+        "SELECT EMP_ID, CASE {branches}ELSE 'other' END AS LABEL FROM TEST_SCHEMA.EMPLOYEES"
+    );
+    assert!(long_query.len() > 20_000);
+    p.call_ok(
+        "create_view",
+        p.schema_params(json!({ "view_name": "V_TMP_LONG", "definition": long_query })),
+    );
+    assert_eq!(definition_of(&mut p, "V_TMP_LONG"), long_query);
+    let listed = p.call_ok("get_views", p.schema_params(json!({})));
+    let long = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["name"] == "V_TMP_LONG")
+        .expect("V_TMP_LONG listed");
+    assert_eq!(long["definition"].as_str().unwrap(), long_query);
+
+    // A complete CREATE VIEW statement is accepted as a definition too.
+    p.call_ok(
+        "alter_view",
+        p.schema_params(json!({
+            "view_name": "V_TMP",
+            "definition": "CREATE OR REPLACE VIEW TEST_SCHEMA.V_TMP AS SELECT EMP_ID FROM TEST_SCHEMA.EMPLOYEES WHERE EMP_ID = 6"
+        })),
+    );
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([[6]]));
+
+    // Errors: a query that does not compile, a view that is not there, no
+    // query at all.
+    let resp = p.call(
+        "alter_view",
+        p.schema_params(
+            json!({ "view_name": "V_TMP", "definition": "SELECT NOPE FROM EMPLOYEES" }),
+        ),
+    );
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("SQL0206N"),
+        "{resp}"
+    );
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP", Value::Null, 1);
+    assert_eq!(
+        rows["rows"],
+        json!([[6]]),
+        "the view is unchanged after a failed alter"
+    );
+    let resp = p.call(
+        "alter_view",
+        p.schema_params(
+            json!({ "view_name": "NOPE", "definition": "SELECT 1 AS X FROM SYSIBM.SYSDUMMY1" }),
+        ),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("View \"TEST_SCHEMA\".\"NOPE\" was not found")
+    );
+    let resp = p.call(
+        "create_view",
+        p.schema_params(json!({ "view_name": "V_EMPTY", "definition": " ; " })),
+    );
+    assert_eq!(resp["error"]["message"], json!("A view needs a query"));
+
+    // Drop.
+    for view in ["V_TMP", "V_TMP_LIST", "V_TMP_LONG"] {
+        let dropped = p.call_ok("drop_view", p.schema_params(json!({ "view_name": view })));
+        assert_eq!(dropped, Value::Null);
+    }
+    assert_eq!(view_names(&mut p), ["V_DEPT_SUMMARY", "V_EMP_DETAILS"]);
+    let resp = p.call(
+        "drop_view",
+        p.schema_params(json!({ "view_name": "V_TMP" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("SQL0204N \"TEST_SCHEMA.V_TMP\" is an undefined name. SQLSTATE=42704")
+    );
+
+    // Delimited names all the way.
+    p.query("DROP VIEW \"Mixed Case\".\"Tmp View\"", Value::Null, 1);
+    p.call_ok(
+        "create_view",
+        p.params_in(
+            "Mixed Case",
+            json!({ "view_name": "Tmp View", "definition": "SELECT \"O'Brien\" AS \"Who\" FROM \"Order Details\"" }),
+        ),
+    );
+    let rows = p.query_ok("SELECT * FROM \"Mixed Case\".\"Tmp View\"", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([["it's"]]));
+    p.call_ok(
+        "drop_view",
+        p.params_in("Mixed Case", json!({ "view_name": "Tmp View" })),
     );
 }
 
