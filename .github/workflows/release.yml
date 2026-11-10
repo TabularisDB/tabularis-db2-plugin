@@ -15,13 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check tag matches manifest version
+      - name: Check tag matches manifest and EXPLAIN parser versions
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           TABULARIUM_VERSION=$(jq -r .version .tabularium)
+          EXPLAIN_VERSION=$(jq -r .version explain/package.json)
 
           if [ "$TAG_VERSION" != "$TABULARIUM_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match .tabularium version ($TABULARIUM_VERSION)"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$EXPLAIN_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match explain/package.json version ($EXPLAIN_VERSION)"
             exit 1
           fi
 
@@ -33,9 +38,44 @@ jobs:
             exit 1
           fi
 
+  # The Visual EXPLAIN parser is plain JavaScript, the same on every
+  # platform: built and tested once, then packed into every archive.
+  explain:
+    name: EXPLAIN parser
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # pnpm comes from the "packageManager" field of explain/package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: explain/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          # tsup 9 requires Node 22.18 or newer on the Node 22 line.
+          node-version: "22.18"
+
+      - name: Typecheck, test and build
+        working-directory: explain
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+
+      - name: Stash bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: explain-parser
+          path: explain/dist/index.iife.js
+          retention-days: 1
+
   build:
     name: ${{ matrix.platform-label }}
-    needs: validate
+    needs: [validate, explain]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -95,6 +135,14 @@ jobs:
           LIBRARY_PATH: ${{ matrix.target == 'x86_64-apple-darwin' && '/usr/local/lib' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
 
+      # `.tabularium` declares the bundle at explain/dist/index.iife.js,
+      # relative to the installed plugin directory.
+      - name: Download EXPLAIN parser
+        uses: actions/download-artifact@v8
+        with:
+          name: explain-parser
+          path: staging/explain/dist
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         run: |
@@ -102,6 +150,7 @@ jobs:
           mkdir -p "$STAGE"
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.binary-suffix }} "$STAGE/"
           cp .tabularium "$STAGE/"
+          test -f "$STAGE/explain/dist/index.iife.js"
           (cd "$STAGE" && zip -r ../db2-plugin-${{ matrix.platform-label }}.zip .)
 
       - name: Package (windows)
@@ -112,6 +161,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\${{ env.BINARY_NAME }}${{ matrix.binary-suffix }}" $stage
           Copy-Item ".tabularium" $stage
+          if (-not (Test-Path "$stage\explain\dist\index.iife.js")) {
+            Write-Error "EXPLAIN parser bundle missing from the archive"
+            exit 1
+          }
           Compress-Archive -Path "$stage\*" -DestinationPath "db2-plugin-${{ matrix.platform-label }}.zip"
 
       # `initialize` needs no Db2 server or ODBC driver, only the ODBC driver

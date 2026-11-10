@@ -4,7 +4,8 @@ use crate::utils::blob::{encode_blob_preview, MAX_BLOB_PREVIEW_SIZE};
 use crate::utils::identifiers::quote_identifier;
 use crate::utils::values::string_literal;
 use odbc_api::handles::{AsStatementRef, Record, Statement};
-use odbc_api::{Connection, ConnectionOptions, Cursor, Environment};
+use odbc_api::parameter::InputParameter;
+use odbc_api::{Connection, ConnectionOptions, Cursor, Environment, IntoParameter};
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -24,6 +25,8 @@ extern "C" {
         indicator: *mut OdbcLen,
     ) -> i16;
     fn SQLRowCount(stmt: OdbcHandle, row_count: *mut OdbcLen) -> i16;
+    fn SQLSetStmtAttr(stmt: OdbcHandle, attribute: i32, value: OdbcHandle, length: i32) -> i16;
+    fn SQLPrepare(stmt: OdbcHandle, text: *const u8, length: i32) -> i16;
     fn SQLColAttribute(
         stmt: OdbcHandle,
         column: u16,
@@ -42,6 +45,9 @@ const SQL_SUCCESS_WITH_INFO: i16 = 1;
 const SQL_NO_DATA: i16 = 100;
 const SQL_NULL_DATA: OdbcLen = -1;
 const SQL_NO_TOTAL: OdbcLen = -4;
+/// Db2 CLI's statement attribute for deferred prepare, and its "off" value.
+const SQL_ATTR_DEFERRED_PREPARE: i32 = 1277;
+const SQL_DEFERRED_PREPARE_OFF: usize = 0;
 
 /// Size of the buffer one `SQLGetData` call fills. Longer values (CLOBs,
 /// view and routine bodies, long comments) are read in several calls.
@@ -137,6 +143,30 @@ pub struct TextQueryResult {
 pub struct Window {
     pub offset: u64,
     pub limit: u64,
+}
+
+/// A value bound to a `?` parameter marker.
+///
+/// Text and binary data travel as parameters rather than as SQL literals: a
+/// string constant is limited to 32,672 bytes, which a CLOB or a BLOB easily
+/// exceeds, and a parameter needs no quoting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl Param {
+    fn boxed(&self) -> Box<dyn InputParameter> {
+        match self {
+            Self::Text(text) => Box::new(text.clone().into_parameter()),
+            Self::Bytes(bytes) => Box::new(bytes.clone().into_parameter()),
+        }
+    }
+}
+
+fn boxed_params(params: &[Param]) -> Vec<Box<dyn InputParameter>> {
+    params.iter().map(Param::boxed).collect()
 }
 
 /// What running a statement produced.
@@ -300,6 +330,42 @@ impl Session {
         Ok(affected_rows(&mut statement))
     }
 
+    /// Like [`Self::execute`], with values bound to the statement's `?`
+    /// markers in order.
+    pub fn execute_with(&self, sql: &str, params: &[Param]) -> PluginResult<u64> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        let bound = boxed_params(params);
+        if let Some(cursor) = statement
+            .execute(sql, bound.as_slice())
+            .map_err(odbc_error)?
+        {
+            release_cursor(cursor);
+            return Ok(0);
+        }
+        Ok(affected_rows(&mut statement))
+    }
+
+    /// Runs a query with bound parameters and returns the first column of
+    /// its first row as raw bytes, read in full; `None` when the query
+    /// returns no row or the value is NULL.
+    pub fn fetch_bytes(&self, sql: &str, params: &[Param]) -> PluginResult<Option<Vec<u8>>> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        let bound = boxed_params(params);
+        let Some(mut cursor) = statement
+            .execute(sql, bound.as_slice())
+            .map_err(odbc_error)?
+        else {
+            return Err("The query did not return a result set".to_string());
+        };
+        let result = match fetch_next(&mut cursor) {
+            Ok(true) => read_binary_cell(&mut cursor, 1),
+            Ok(false) => Ok(None),
+            Err(error) => Err(error),
+        };
+        release_cursor(cursor);
+        result
+    }
+
     /// Runs any statement and reports what it produced. Whether it is a query
     /// is decided by Db2 (did it open a result set?), not by looking at the
     /// SQL text, so `VALUES`, `CALL`, a `WITH` that ends in an `INSERT` and a
@@ -317,6 +383,53 @@ impl Session {
             return result.map(Outcome::Rows);
         }
         Ok(Outcome::Affected(affected_rows(&mut statement)))
+    }
+}
+
+impl Session {
+    /// Has Db2 compile a statement without running it, and returns the
+    /// error it reports. CLI defers a prepare until the statement runs,
+    /// answering describe calls on its own, so deferral is turned off for
+    /// this statement.
+    pub fn check(&self, sql: &str) -> PluginResult<()> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        let handle = statement.as_stmt_ref().as_sys().0 as OdbcHandle;
+        let ret = unsafe {
+            SQLSetStmtAttr(
+                handle,
+                SQL_ATTR_DEFERRED_PREPARE,
+                SQL_DEFERRED_PREPARE_OFF as OdbcHandle,
+                0,
+            )
+        };
+        if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
+            return Err(statement_error(&mut statement, "SQLSetStmtAttr", ret));
+        }
+        let ret = unsafe { SQLPrepare(handle, sql.as_ptr(), sql.len() as i32) };
+        if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
+            return Err(statement_error(&mut statement, "SQLPrepare", ret));
+        }
+        Ok(())
+    }
+
+    /// Runs a statement to the end and says how many rows it returned, or
+    /// changed when it returns none. The rows are fetched but their values
+    /// are never read: this is for timing a statement, not for its data.
+    pub fn drain(&self, sql: &str) -> PluginResult<u64> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        if let Some(mut cursor) = statement.execute(sql, ()).map_err(odbc_error)? {
+            let mut count = 0u64;
+            let result = loop {
+                match fetch_next(&mut cursor) {
+                    Ok(true) => count += 1,
+                    Ok(false) => break Ok(count),
+                    Err(error) => break Err(error),
+                }
+            };
+            release_cursor(cursor);
+            return result;
+        }
+        Ok(affected_rows(&mut statement))
     }
 }
 
@@ -464,6 +577,55 @@ fn read_blob_cell(cursor: &mut impl Cursor, column: u16) -> PluginResult<Option<
     };
     let preview = &buffer[..total.min(buffer.len())];
     Ok(Some(encode_blob_preview(preview, total)))
+}
+
+/// Reads one cell as raw bytes, however long it is (see [`read_cell`] for
+/// why this goes through raw `SQLGetData` calls).
+fn read_binary_cell(cursor: &mut impl Cursor, column: u16) -> PluginResult<Option<Vec<u8>>> {
+    let statement = cursor.as_stmt_ref().as_sys().0 as OdbcHandle;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut bytes: Vec<u8> = Vec::new();
+
+    loop {
+        let mut indicator: OdbcLen = 0;
+        let ret = unsafe {
+            SQLGetData(
+                statement,
+                column,
+                SQL_C_BINARY,
+                buffer.as_mut_ptr() as *mut c_void,
+                buffer.len() as OdbcLen,
+                &mut indicator,
+            )
+        };
+        if ret == SQL_NO_DATA {
+            break;
+        }
+        if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
+            return Err(statement_error(cursor, "SQLGetData", ret));
+        }
+
+        let indicator = (indicator as i32) as OdbcLen;
+        if indicator == SQL_NULL_DATA {
+            return Ok(None);
+        }
+
+        // Binary data is not NUL-terminated: a full buffer is a full piece.
+        let truncated = ret == SQL_SUCCESS_WITH_INFO
+            && (indicator == SQL_NO_TOTAL || indicator as usize > buffer.len());
+        let piece = if truncated {
+            buffer.len()
+        } else {
+            (indicator.max(0) as usize).min(buffer.len())
+        };
+        bytes.extend_from_slice(&buffer[..piece]);
+
+        if !truncated {
+            break;
+        }
+    }
+
+    Ok(Some(bytes))
 }
 
 /// Advances the cursor one row; `false` at the end of the result set. An

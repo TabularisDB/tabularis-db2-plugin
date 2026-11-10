@@ -19,7 +19,7 @@
   "readme": "README.md",
   "homepage": "https://github.com/TabularisDB/tabularis-db2-plugin",
   "documentation_url": "https://github.com/TabularisDB/tabularis-db2-plugin#readme",
-  "min_runtime_version": "0.25.0",
+  "min_runtime_version": "0.30.0",
   "support": {
     "issues_url": "https://github.com/TabularisDB/tabularis-db2-plugin/issues"
   },
@@ -35,6 +35,7 @@
     "schemas": true,
     "views": true,
     "routines": true,
+    "explain": true,
     "file_based": false,
     "folder_based": false,
     "connection_string": true,
@@ -181,12 +182,21 @@
     "auto_increment_keyword": "",
     "serial_type": "",
     "inline_pk": false,
+    "column_comments": true,
     "alter_column": true,
     "create_foreign_keys": true,
     "no_connection_required": false,
     "manage_tables": true,
     "readonly": false
   },
+  "explain_parsers": [
+    {
+      "engine": "db2",
+      "format": "db2-explain-tables-json",
+      "label": "Db2 explain tables",
+      "module": "explain/dist/index.iife.js"
+    }
+  ],
   "settings": [
     {
       "key": "driver_name",
@@ -227,21 +237,21 @@
       "category": "numeric",
       "requires_length": false,
       "requires_precision": false,
-      "supports_auto_increment": false
+      "supports_auto_increment": true
     },
     {
       "name": "INTEGER",
       "category": "numeric",
       "requires_length": false,
       "requires_precision": false,
-      "supports_auto_increment": false
+      "supports_auto_increment": true
     },
     {
       "name": "BIGINT",
       "category": "numeric",
       "requires_length": false,
       "requires_precision": false,
-      "supports_auto_increment": false
+      "supports_auto_increment": true
     },
     {
       "name": "DECIMAL",
@@ -254,7 +264,7 @@
       "name": "DECFLOAT",
       "category": "numeric",
       "requires_length": false,
-      "requires_precision": true,
+      "requires_precision": false,
       "supports_auto_increment": false
     },
     {
@@ -365,15 +375,15 @@
       "supports_auto_increment": false
     },
     {
-      "name": "XML",
-      "category": "other",
+      "name": "BOOLEAN",
+      "category": "boolean",
       "requires_length": false,
       "requires_precision": false,
       "supports_auto_increment": false
     },
     {
-      "name": "JSON",
-      "category": "json",
+      "name": "XML",
+      "category": "xml",
       "requires_length": false,
       "requires_precision": false,
       "supports_auto_increment": false
