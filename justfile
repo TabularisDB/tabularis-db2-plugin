@@ -1,13 +1,24 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
-# Build the plugin binary in debug mode.
-build:
+# Build the plugin binary in debug mode, and the Visual EXPLAIN parser.
+build: build-explain
     cargo build
 
 # Build for release (what the GitHub Actions workflow ships).
-release:
+release: build-explain
     cargo build --release
+
+# Build the Visual EXPLAIN parser bundle (explain/dist/index.iife.js).
+build-explain:
+    pnpm --dir explain install --frozen-lockfile
+    pnpm --dir explain build
+
+# Typecheck and test the Visual EXPLAIN parser.
+test-explain:
+    pnpm --dir explain install --frozen-lockfile
+    pnpm --dir explain typecheck
+    pnpm --dir explain test
 
 # tests/integration.rs is excluded: it is a live-database integration test
 # requiring a running Db2 instance — see `just integration`, or the
@@ -70,6 +81,8 @@ dev-install: build
     mkdir -p ~/.local/share/tabularis/plugins/drivers/db2
     cp target/debug/tabularis-db2-plugin ~/.local/share/tabularis/plugins/drivers/db2/
     cp .tabularium ~/.local/share/tabularis/plugins/drivers/db2/
+    mkdir -p ~/.local/share/tabularis/plugins/drivers/db2/explain/dist
+    cp explain/dist/index.iife.js ~/.local/share/tabularis/plugins/drivers/db2/explain/dist/
     @echo "Installed to ~/.local/share/tabularis/plugins/drivers/db2"
     @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
@@ -78,6 +91,8 @@ dev-install: build
     mkdir -p "$HOME/Library/Application Support/tabularis/plugins/drivers/db2"
     cp target/debug/tabularis-db2-plugin "$HOME/Library/Application Support/tabularis/plugins/drivers/db2/"
     cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/drivers/db2/"
+    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/drivers/db2/explain/dist"
+    cp explain/dist/index.iife.js "$HOME/Library/Application Support/tabularis/plugins/drivers/db2/explain/dist/"
     @echo "Installed to ~/Library/Application Support/tabularis/plugins/drivers/db2"
     @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
@@ -90,6 +105,8 @@ dev-install: build
     New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
     Copy-Item "target\debug\tabularis-db2-plugin.exe" $dest; \
     Copy-Item ".tabularium" $dest; \
+    New-Item -ItemType Directory -Force -Path (Join-Path $dest "explain\dist") | Out-Null; \
+    Copy-Item "explain\dist\index.iife.js" (Join-Path $dest "explain\dist"); \
     Write-Host "Installed to $dest"; \
     Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 

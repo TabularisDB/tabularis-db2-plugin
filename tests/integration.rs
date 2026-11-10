@@ -670,14 +670,24 @@ fn test_get_views() {
     let result = p.call_ok("get_views", p.schema_params(json!({})));
     let views = result.as_array().expect("expected array");
     let names: Vec<&str> = views.iter().filter_map(|v| v["name"].as_str()).collect();
+    // Every view of the schema, sorted, and nothing that is not a view.
+    assert_eq!(names, ["V_DEPT_SUMMARY", "V_EMP_DETAILS"]);
 
-    assert!(
-        names.contains(&"V_EMP_DETAILS"),
-        "V_EMP_DETAILS not found in: {names:?}"
-    );
-    assert!(
-        names.contains(&"V_DEPT_SUMMARY"),
-        "V_DEPT_SUMMARY not found in: {names:?}"
+    // The definition is the view's query, without the CREATE VIEW in front.
+    for view in views {
+        let definition = view["definition"].as_str().expect("definition");
+        assert!(definition.starts_with("SELECT"), "{definition}");
+    }
+
+    // A schema without views, and one with delimited names.
+    let none = p.call_ok("get_views", p.params_in("EMPTY_SCHEMA", json!({})));
+    assert_eq!(none, json!([]));
+    let mixed = p.call_ok("get_views", p.params_in("Mixed Case", json!({})));
+    assert_eq!(mixed.as_array().unwrap().len(), 1);
+    assert_eq!(mixed[0]["name"], json!("Cheap Orders"));
+    assert_eq!(
+        mixed[0]["definition"],
+        json!("SELECT \"Order Id\", \"Unit Price\" FROM \"Mixed Case\".\"Order Details\" WHERE \"Unit Price\" < 10")
     );
 }
 
@@ -686,17 +696,57 @@ fn test_get_view_definition() {
     require_db2!();
     let mut p = Plugin::spawn();
 
+    // The query as Db2 stored it (the command line processor that loads the
+    // fixtures joins the lines), without the CREATE VIEW in front.
     let result = p.call_ok(
         "get_view_definition",
         p.schema_params(json!({ "view_name": "V_EMP_DETAILS" })),
     );
-    let definition = result.as_str().expect("expected string");
-    // DB2 stores view definitions in upper case or as-is
-    let upper = definition.to_uppercase();
-    assert!(
-        upper.contains("EMPLOYEES") && upper.contains("DEPARTMENTS"),
-        "view definition should reference EMPLOYEES and DEPARTMENTS: {definition}"
+    assert_eq!(
+        result,
+        json!(
+            "SELECT e.EMP_ID, e.FIRST_NAME, e.LAST_NAME, e.EMAIL, e.HIRE_DATE, e.SALARY, \
+             d.DEPT_NAME, d.LOCATION FROM TEST_SCHEMA.EMPLOYEES e LEFT JOIN \
+             TEST_SCHEMA.DEPARTMENTS d ON e.DEPT_ID = d.DEPT_ID"
+        )
     );
+
+    // The definition is itself a query that returns what the view returns.
+    let definition = result.as_str().unwrap().to_string();
+    let from_definition = p.query_ok(&definition, Value::Null, 1);
+    let from_view = p.query_ok("SELECT * FROM TEST_SCHEMA.V_EMP_DETAILS", Value::Null, 1);
+    assert_eq!(from_definition["columns"], from_view["columns"]);
+    assert_eq!(
+        from_definition["rows"].as_array().unwrap().len(),
+        from_view["rows"].as_array().unwrap().len()
+    );
+
+    // Both spellings of the argument, and the errors.
+    let by_guide_name = p.call_ok(
+        "get_view_definition",
+        p.schema_params(json!({ "view": "V_DEPT_SUMMARY" })),
+    );
+    assert!(by_guide_name
+        .as_str()
+        .unwrap()
+        .contains("COUNT(e.EMP_ID) AS EMP_COUNT"));
+
+    let resp = p.call(
+        "get_view_definition",
+        p.schema_params(json!({ "view_name": "NOPE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("View \"TEST_SCHEMA\".\"NOPE\" was not found")
+    );
+    // A table is not a view.
+    let resp = p.call(
+        "get_view_definition",
+        p.schema_params(json!({ "view_name": "EMPLOYEES" })),
+    );
+    assert!(resp.get("error").is_some(), "{resp}");
+    let resp = p.call("get_view_definition", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
 }
 
 #[test]
@@ -708,16 +758,274 @@ fn test_get_view_columns() {
         "get_view_columns",
         p.schema_params(json!({ "view_name": "V_EMP_DETAILS" })),
     );
-    let columns = result.as_array().expect("expected array");
-    let names: Vec<&str> = columns.iter().filter_map(|c| c["name"].as_str()).collect();
+    let summary: Vec<Value> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(type_summary)
+        .collect();
+    // The columns of the view, in order, with the types of the columns they
+    // come from.
+    assert_eq!(
+        json!(summary),
+        json!([
+            ["EMP_ID", "INTEGER", null, null, null, null],
+            ["FIRST_NAME", "VARCHAR", "VARCHAR(50)", 50, null, null],
+            ["LAST_NAME", "VARCHAR", "VARCHAR(50)", 50, null, null],
+            ["EMAIL", "VARCHAR", "VARCHAR(100)", 100, null, null],
+            ["HIRE_DATE", "DATE", null, null, null, null],
+            ["SALARY", "DECIMAL", "DECIMAL(10,2)", null, 10, 2],
+            ["DEPT_NAME", "VARCHAR", "VARCHAR(100)", 100, null, null],
+            ["LOCATION", "VARCHAR", "VARCHAR(200)", 200, null, null],
+        ])
+    );
+    for column in result.as_array().unwrap() {
+        assert_eq!(column["is_pk"], json!(false), "a view has no key");
+    }
+    // An outer-joined column is nullable even though its source is not.
+    assert_eq!(result[6]["name"], json!("DEPT_NAME"));
+    assert_eq!(result[6]["is_nullable"], json!(true));
 
-    assert!(
-        names.contains(&"FIRST_NAME"),
-        "view should expose FIRST_NAME: {names:?}"
+    // They are the columns a query on the view returns.
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_EMP_DETAILS", json!(1), 1);
+    let names: Vec<&Value> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["name"])
+        .collect();
+    assert_eq!(json!(names), rows["columns"]);
+
+    // Computed columns: the types Db2 derived for them.
+    let summary = p.call_ok(
+        "get_view_columns",
+        p.schema_params(json!({ "view_name": "V_DEPT_SUMMARY" })),
+    );
+    let names: Vec<Value> = summary
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| json!([column["name"], column["data_type"]]))
+        .collect();
+    assert_eq!(
+        json!(names),
+        json!([
+            ["DEPT_ID", "INTEGER"],
+            ["DEPT_NAME", "VARCHAR"],
+            ["EMP_COUNT", "INTEGER"],
+            ["AVG_SALARY", "DECIMAL"]
+        ])
+    );
+
+    let missing = p.call_ok(
+        "get_view_columns",
+        p.schema_params(json!({ "view_name": "NOPE" })),
+    );
+    assert_eq!(missing, json!([]));
+}
+
+#[test]
+fn test_create_alter_drop_view() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    for view in ["V_TMP", "V_TMP_LIST", "V_TMP_LONG"] {
+        p.query(&format!("DROP VIEW TEST_SCHEMA.{view}"), Value::Null, 1);
+    }
+    let view_names = |p: &mut Plugin| -> Vec<String> {
+        p.call_ok("get_views", p.schema_params(json!({})))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|view| view["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let definition_of = |p: &mut Plugin, view: &str| -> String {
+        p.call_ok(
+            "get_view_definition",
+            p.schema_params(json!({ "view_name": view })),
+        )
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+
+    // Create from a query, as Tabularis's "Create New View" does.
+    let created = p.call_ok(
+        "create_view",
+        p.schema_params(json!({
+            "view_name": "V_TMP",
+            "definition": "SELECT EMP_ID, LAST_NAME FROM EMPLOYEES WHERE DEPT_ID = 1;\n"
+        })),
+    );
+    assert_eq!(created, Value::Null);
+    assert!(view_names(&mut p).contains(&"V_TMP".to_string()));
+    assert_eq!(
+        definition_of(&mut p, "V_TMP"),
+        "SELECT EMP_ID, LAST_NAME FROM EMPLOYEES WHERE DEPT_ID = 1"
+    );
+    let rows = p.query_ok(
+        "SELECT * FROM TEST_SCHEMA.V_TMP ORDER BY EMP_ID",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        rows["rows"],
+        json!([[1, "Doe"], [2, "Smith"], [4, "Williams"]])
+    );
+
+    // It already exists.
+    let resp = p.call(
+        "create_view",
+        p.schema_params(
+            json!({ "view_name": "V_TMP", "definition": "SELECT 1 AS X FROM SYSIBM.SYSDUMMY1" }),
+        ),
     );
     assert!(
-        names.contains(&"DEPT_NAME"),
-        "view should expose DEPT_NAME: {names:?}"
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("SQL0601N"),
+        "{resp}"
+    );
+
+    // Alter: what get_view_definition returned, edited and sent back.
+    let edited = definition_of(&mut p, "V_TMP").replace("DEPT_ID = 1", "DEPT_ID = 2");
+    let altered = p.call_ok(
+        "alter_view",
+        p.schema_params(json!({ "view_name": "V_TMP", "definition": edited })),
+    );
+    assert_eq!(altered, Value::Null);
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([[3, "Johnson"]]));
+    assert_eq!(
+        definition_of(&mut p, "V_TMP"),
+        "SELECT EMP_ID, LAST_NAME FROM EMPLOYEES WHERE DEPT_ID = 2"
+    );
+
+    // A view with an explicit column list keeps it when its query is edited.
+    p.query_ok(
+        "CREATE VIEW TEST_SCHEMA.V_TMP_LIST (\"Who\", HOW_MUCH) AS SELECT LAST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        definition_of(&mut p, "V_TMP_LIST"),
+        "SELECT LAST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES"
+    );
+    p.call_ok(
+        "alter_view",
+        p.schema_params(json!({
+            "view_name": "V_TMP_LIST",
+            "definition": "SELECT FIRST_NAME, SALARY FROM TEST_SCHEMA.EMPLOYEES WHERE EMP_ID = 1"
+        })),
+    );
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP_LIST", Value::Null, 1);
+    assert_eq!(
+        rows["columns"],
+        json!(["Who", "HOW_MUCH"]),
+        "column names kept"
+    );
+    assert_eq!(rows["rows"], json!([["John", "75000.00"]]));
+
+    // A definition far longer than one fetch buffer comes back whole.
+    let branches: String = (0..600)
+        .map(|n| format!("WHEN EMP_ID = {n} THEN 'employee number {n}' "))
+        .collect();
+    let long_query = format!(
+        "SELECT EMP_ID, CASE {branches}ELSE 'other' END AS LABEL FROM TEST_SCHEMA.EMPLOYEES"
+    );
+    assert!(long_query.len() > 20_000);
+    p.call_ok(
+        "create_view",
+        p.schema_params(json!({ "view_name": "V_TMP_LONG", "definition": long_query })),
+    );
+    assert_eq!(definition_of(&mut p, "V_TMP_LONG"), long_query);
+    let listed = p.call_ok("get_views", p.schema_params(json!({})));
+    let long = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["name"] == "V_TMP_LONG")
+        .expect("V_TMP_LONG listed");
+    assert_eq!(long["definition"].as_str().unwrap(), long_query);
+
+    // A complete CREATE VIEW statement is accepted as a definition too.
+    p.call_ok(
+        "alter_view",
+        p.schema_params(json!({
+            "view_name": "V_TMP",
+            "definition": "CREATE OR REPLACE VIEW TEST_SCHEMA.V_TMP AS SELECT EMP_ID FROM TEST_SCHEMA.EMPLOYEES WHERE EMP_ID = 6"
+        })),
+    );
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([[6]]));
+
+    // Errors: a query that does not compile, a view that is not there, no
+    // query at all.
+    let resp = p.call(
+        "alter_view",
+        p.schema_params(
+            json!({ "view_name": "V_TMP", "definition": "SELECT NOPE FROM EMPLOYEES" }),
+        ),
+    );
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("SQL0206N"),
+        "{resp}"
+    );
+    let rows = p.query_ok("SELECT * FROM TEST_SCHEMA.V_TMP", Value::Null, 1);
+    assert_eq!(
+        rows["rows"],
+        json!([[6]]),
+        "the view is unchanged after a failed alter"
+    );
+    let resp = p.call(
+        "alter_view",
+        p.schema_params(
+            json!({ "view_name": "NOPE", "definition": "SELECT 1 AS X FROM SYSIBM.SYSDUMMY1" }),
+        ),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("View \"TEST_SCHEMA\".\"NOPE\" was not found")
+    );
+    let resp = p.call(
+        "create_view",
+        p.schema_params(json!({ "view_name": "V_EMPTY", "definition": " ; " })),
+    );
+    assert_eq!(resp["error"]["message"], json!("A view needs a query"));
+
+    // Drop.
+    for view in ["V_TMP", "V_TMP_LIST", "V_TMP_LONG"] {
+        let dropped = p.call_ok("drop_view", p.schema_params(json!({ "view_name": view })));
+        assert_eq!(dropped, Value::Null);
+    }
+    assert_eq!(view_names(&mut p), ["V_DEPT_SUMMARY", "V_EMP_DETAILS"]);
+    let resp = p.call(
+        "drop_view",
+        p.schema_params(json!({ "view_name": "V_TMP" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("SQL0204N \"TEST_SCHEMA.V_TMP\" is an undefined name. SQLSTATE=42704")
+    );
+
+    // Delimited names all the way.
+    p.query("DROP VIEW \"Mixed Case\".\"Tmp View\"", Value::Null, 1);
+    p.call_ok(
+        "create_view",
+        p.params_in(
+            "Mixed Case",
+            json!({ "view_name": "Tmp View", "definition": "SELECT \"O'Brien\" AS \"Who\" FROM \"Order Details\"" }),
+        ),
+    );
+    let rows = p.query_ok("SELECT * FROM \"Mixed Case\".\"Tmp View\"", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([["it's"]]));
+    p.call_ok(
+        "drop_view",
+        p.params_in("Mixed Case", json!({ "view_name": "Tmp View" })),
     );
 }
 
@@ -725,29 +1033,151 @@ fn test_get_view_columns() {
 // Tests — Foreign keys & Indexes
 // ---------------------------------------------------------------------------
 
+/// `[name, column, ref table, ref column, on delete, on update, position]`
+/// of each foreign key entry.
+fn foreign_key_entries(keys: &Value) -> Vec<Value> {
+    keys.as_array()
+        .expect("expected array")
+        .iter()
+        .map(|key| {
+            json!([
+                key["name"],
+                key["column_name"],
+                key["ref_table"],
+                key["ref_column"],
+                key["on_delete"],
+                key["on_update"],
+                key["seq_in_fk"]
+            ])
+        })
+        .collect()
+}
+
+fn foreign_keys_of(p: &mut Plugin, table: &str) -> Vec<Value> {
+    let keys = p.call_ok(
+        "get_foreign_keys",
+        p.schema_params(json!({ "table": table })),
+    );
+    foreign_key_entries(&keys)
+}
+
 #[test]
 fn test_get_foreign_keys() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "get_foreign_keys",
-        p.schema_params(json!({ "table": "EMPLOYEES" })),
+    // One foreign key per rule Db2 has for deletes, spelled out.
+    assert_eq!(
+        foreign_keys_of(&mut p, "EMPLOYEES"),
+        [json!([
+            "FK_EMP_DEPT",
+            "DEPT_ID",
+            "DEPARTMENTS",
+            "DEPT_ID",
+            "SET NULL",
+            "NO ACTION",
+            1
+        ])]
     );
-    let fks = result.as_array().expect("expected array");
+    assert_eq!(
+        foreign_keys_of(&mut p, "PROJECTS"),
+        [json!([
+            "FK_PROJ_DEPT",
+            "DEPT_ID",
+            "DEPARTMENTS",
+            "DEPT_ID",
+            "CASCADE",
+            "NO ACTION",
+            1
+        ])]
+    );
+    assert_eq!(
+        foreign_keys_of(&mut p, "FK_CHILD"),
+        [json!([
+            "FK_CHILD_PARENT",
+            "PARENT_ID",
+            "FK_PARENT",
+            "ID",
+            "RESTRICT",
+            "NO ACTION",
+            1
+        ])]
+    );
+    assert_eq!(
+        foreign_keys_of(&mut p, "DROP_TEST"),
+        [json!([
+            "FK_DROP_TEST",
+            "PARENT_ID",
+            "DROP_TEST_PARENT",
+            "ID",
+            "NO ACTION",
+            "NO ACTION",
+            1
+        ])]
+    );
 
-    let fk = fks
-        .iter()
-        .find(|f| {
-            f["name"]
-                .as_str()
-                .map(|n| n.contains("FK_EMP_DEPT"))
-                .unwrap_or(false)
-        })
-        .expect("FK_EMP_DEPT not found");
+    // Two foreign keys on one table, sorted by name.
+    assert_eq!(
+        foreign_keys_of(&mut p, "EMP_PROJECTS"),
+        [
+            json!([
+                "FK_EP_EMP",
+                "EMP_ID",
+                "EMPLOYEES",
+                "EMP_ID",
+                "CASCADE",
+                "NO ACTION",
+                1
+            ]),
+            json!([
+                "FK_EP_PROJ",
+                "PROJECT_ID",
+                "PROJECTS",
+                "PROJECT_ID",
+                "CASCADE",
+                "NO ACTION",
+                1
+            ]),
+        ]
+    );
 
-    assert_eq!(fk["column_name"].as_str().unwrap().trim(), "DEPT_ID");
-    assert_eq!(fk["ref_table"].as_str().unwrap().trim(), "DEPARTMENTS");
+    // A composite foreign key: one entry per column, each paired with the
+    // parent column at the same position, plus the rule on updates.
+    assert_eq!(
+        foreign_keys_of(&mut p, "COMPOSITE_CHILD"),
+        [
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_REGION",
+                "COMPOSITE_PARENT",
+                "REGION",
+                "CASCADE",
+                "RESTRICT",
+                1
+            ]),
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_CODE",
+                "COMPOSITE_PARENT",
+                "CODE",
+                "CASCADE",
+                "RESTRICT",
+                2
+            ]),
+        ]
+    );
+
+    // A table that is only referenced, one without any, one that does not
+    // exist, and a view.
+    for table in ["DEPARTMENTS", "KEYLESS_TEST", "NOPE", "V_EMP_DETAILS"] {
+        assert_eq!(
+            foreign_keys_of(&mut p, table),
+            Vec::<Value>::new(),
+            "{table}"
+        );
+    }
+    let resp = p.call("get_foreign_keys", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
 }
 
 #[test]
@@ -755,17 +1185,97 @@ fn test_get_all_foreign_keys_batch() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok("get_all_foreign_keys_batch", p.schema_params(json!({})));
-    let map = result.as_object().expect("expected object");
+    let batch = p.call_ok("get_all_foreign_keys_batch", p.schema_params(json!({})));
+    let map = batch.as_object().expect("expected object");
 
-    assert!(
-        map.contains_key("EMPLOYEES"),
-        "batch should include EMPLOYEES FK"
+    // Exactly the tables that have foreign keys.
+    let mut tables: Vec<&String> = map.keys().collect();
+    tables.sort();
+    assert_eq!(
+        tables,
+        [
+            "COMPOSITE_CHILD",
+            "DROP_TEST",
+            "EMPLOYEES",
+            "EMP_PROJECTS",
+            "FK_CHILD",
+            "PROJECTS"
+        ]
     );
-    assert!(
-        map.contains_key("EMP_PROJECTS"),
-        "batch should include EMP_PROJECTS FKs"
+
+    // For each of them, what get_foreign_keys returns.
+    for table in &tables {
+        let single = p.call_ok(
+            "get_foreign_keys",
+            p.schema_params(json!({ "table": table })),
+        );
+        assert_eq!(map[table.as_str()], single, "{table}");
+    }
+    assert_eq!(
+        foreign_key_entries(&map["COMPOSITE_CHILD"]),
+        [
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_REGION",
+                "COMPOSITE_PARENT",
+                "REGION",
+                "CASCADE",
+                "RESTRICT",
+                1
+            ]),
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_CODE",
+                "COMPOSITE_PARENT",
+                "CODE",
+                "CASCADE",
+                "RESTRICT",
+                2
+            ]),
+        ]
     );
+
+    // `tables` narrows the batch; a table without foreign keys has no entry.
+    let batch = p.call_ok(
+        "get_all_foreign_keys_batch",
+        p.schema_params(json!({ "tables": ["EMPLOYEES", "DEPARTMENTS", "NOPE"] })),
+    );
+    let keys: Vec<&String> = batch.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["EMPLOYEES"]);
+
+    // A schema without foreign keys.
+    for schema in ["EMPTY_SCHEMA", "Mixed Case"] {
+        let batch = p.call_ok("get_all_foreign_keys_batch", p.params_in(schema, json!({})));
+        assert_eq!(batch, json!({}), "{schema}");
+    }
+
+    // The schema snapshot carries the same foreign keys.
+    let snapshot = p.call_ok("get_schema_snapshot", p.schema_params(json!({})));
+    for table in snapshot.as_array().unwrap() {
+        let name = table["name"].as_str().unwrap();
+        let expected = map.get(name).cloned().unwrap_or_else(|| json!([]));
+        assert_eq!(table["foreign_keys"], expected, "{name}");
+    }
+}
+
+/// `[name, column, unique, primary, position, expression]` of each index
+/// entry of a table in TEST_SCHEMA.
+fn index_entries(p: &mut Plugin, table: &str) -> Vec<Value> {
+    p.call_ok("get_indexes", p.schema_params(json!({ "table": table })))
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .map(|index| {
+            json!([
+                index["name"],
+                index["column_name"],
+                index["is_unique"],
+                index["is_primary"],
+                index["seq_in_index"],
+                index["is_expression"]
+            ])
+        })
+        .collect()
 }
 
 #[test]
@@ -773,36 +1283,141 @@ fn test_get_indexes() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "get_indexes",
-        p.schema_params(json!({ "table": "EMPLOYEES" })),
-    );
-    let indexes = result.as_array().expect("expected array");
-    let names: Vec<&str> = indexes.iter().filter_map(|i| i["name"].as_str()).collect();
-
-    assert!(
-        names.iter().any(|n| n.contains("IDX_EMP_EMAIL")),
-        "IDX_EMP_EMAIL not found in: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.contains("IDX_EMP_LAST_NAME")),
-        "IDX_EMP_LAST_NAME not found in: {names:?}"
-    );
-
-    // Check unique flag on email index
-    let email_idx = indexes
-        .iter()
-        .find(|i| {
-            i["name"]
-                .as_str()
-                .map(|n| n.contains("IDX_EMP_EMAIL"))
-                .unwrap_or(false)
-        })
-        .expect("email index missing");
+    // Unique, non-unique and the primary key's index, each with its column.
+    let entries = index_entries(&mut p, "EMPLOYEES");
+    assert_eq!(entries.len(), 3, "{entries:?}");
     assert_eq!(
-        email_idx["is_unique"],
-        json!(true),
-        "email index should be unique"
+        entries[0],
+        json!(["IDX_EMP_EMAIL", "EMAIL", true, false, 1, false])
+    );
+    assert_eq!(
+        entries[1],
+        json!(["IDX_EMP_LAST_NAME", "LAST_NAME", false, false, 1, false])
+    );
+    // Db2 names the primary key's index itself (SQL<timestamp>).
+    assert!(
+        entries[2][0].as_str().unwrap().starts_with("SQL"),
+        "{entries:?}"
+    );
+    assert_eq!(
+        entries[2].as_array().unwrap()[1..],
+        json!(["EMP_ID", true, true, 1, false]).as_array().unwrap()[..]
+    );
+
+    // A composite index: one entry per column, in key order.
+    let entries = index_entries(&mut p, "PROJECTS");
+    assert_eq!(
+        entries[0],
+        json!(["IDX_PROJ_STATUS", "STATUS", false, false, 1, false])
+    );
+    assert_eq!(
+        entries[1],
+        json!(["IDX_PROJ_STATUS", "START_DATE", false, false, 2, false])
+    );
+
+    // A composite primary key.
+    let entries = index_entries(&mut p, "EMP_PROJECTS");
+    let primary: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| entry[3] == json!(true))
+        .collect();
+    assert_eq!(primary.len(), 2);
+    assert_eq!(primary[0][1], json!("EMP_ID"));
+    assert_eq!(primary[0][4], json!(1));
+    assert_eq!(primary[1][1], json!("PROJECT_ID"));
+    assert_eq!(primary[1][4], json!(2));
+
+    // A table without indexes, a table that does not exist, and a view.
+    assert_eq!(index_entries(&mut p, "KEYLESS_TEST"), Vec::<Value>::new());
+    assert_eq!(index_entries(&mut p, "NOPE"), Vec::<Value>::new());
+    assert_eq!(index_entries(&mut p, "V_EMP_DETAILS"), Vec::<Value>::new());
+    let resp = p.call("get_indexes", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    // Delimited names.
+    let mixed = p.call_ok(
+        "get_indexes",
+        p.params_in("Mixed Case", json!({ "table": "Order Details" })),
+    );
+    assert_eq!(mixed.as_array().unwrap().len(), 1);
+    assert_eq!(mixed[0]["column_name"], json!("Order Id"));
+    assert_eq!(mixed[0]["is_primary"], json!(true));
+}
+
+#[test]
+fn test_get_indexes_special_kinds() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    for index in [
+        "TEST_SCHEMA.IDX_T_EXPR",
+        "TEST_SCHEMA.IDX_T_INCL",
+        "\"Mixed Case\".\"Idx Elsewhere\"",
+    ] {
+        p.query(&format!("DROP INDEX {index}"), Value::Null, 1);
+    }
+    // An index on an expression with a descending column, a unique index
+    // that carries an extra column, and an index kept in another schema.
+    p.query_ok(
+        "CREATE INDEX TEST_SCHEMA.IDX_T_EXPR ON TEST_SCHEMA.DEPARTMENTS (UPPER(DEPT_NAME), BUDGET DESC)",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "CREATE UNIQUE INDEX TEST_SCHEMA.IDX_T_INCL ON TEST_SCHEMA.DEPARTMENTS (DEPT_NAME) INCLUDE (LOCATION)",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "CREATE INDEX \"Mixed Case\".\"Idx Elsewhere\" ON TEST_SCHEMA.DEPARTMENTS (CREATED_AT)",
+        Value::Null,
+        1,
+    );
+
+    let entries = index_entries(&mut p, "DEPARTMENTS");
+    let named = |name: &str| -> Vec<&Value> {
+        entries
+            .iter()
+            .filter(|entry| entry[0] == json!(name))
+            .collect()
+    };
+    // The expression is reported, not the name Db2 generates for it (K00).
+    assert_eq!(
+        named("IDX_T_EXPR"),
+        [
+            &json!(["IDX_T_EXPR", "UPPER(DEPT_NAME)", false, false, 1, true]),
+            &json!(["IDX_T_EXPR", "BUDGET", false, false, 2, false]),
+        ]
+    );
+    // The INCLUDE column is carried by the index but is not part of its key.
+    assert_eq!(
+        named("IDX_T_INCL"),
+        [&json!(["IDX_T_INCL", "DEPT_NAME", true, false, 1, false])]
+    );
+    assert_eq!(
+        named("Idx Elsewhere"),
+        [&json!([
+            "Idx Elsewhere",
+            "CREATED_AT",
+            false,
+            false,
+            1,
+            false
+        ])]
+    );
+
+    // drop_index finds each one, whichever schema it lives in.
+    for index in ["IDX_T_EXPR", "IDX_T_INCL", "Idx Elsewhere"] {
+        let dropped = p.call_ok(
+            "drop_index",
+            p.schema_params(json!({ "table": "DEPARTMENTS", "index_name": index })),
+        );
+        assert_eq!(dropped, Value::Null, "{index}");
+    }
+    let left = index_entries(&mut p, "DEPARTMENTS");
+    assert_eq!(
+        left.len(),
+        1,
+        "only the primary key's index is left: {left:?}"
     );
 }
 
@@ -810,40 +1425,309 @@ fn test_get_indexes() {
 // Tests — Routines
 // ---------------------------------------------------------------------------
 
+/// `NAME(signature)` of every routine `get_routines` lists, with its type.
+fn routine_entries(plugin: &mut Plugin, schema: &str) -> Vec<(String, String)> {
+    plugin
+        .call_ok("get_routines", plugin.params_in(schema, json!({})))
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .map(|routine| {
+            (
+                format!(
+                    "{}({})",
+                    routine["name"].as_str().expect("name"),
+                    routine["identity_args"].as_str().expect("identity_args")
+                ),
+                routine["routine_type"]
+                    .as_str()
+                    .expect("routine_type")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `MODE NAME TYPE @POSITION` of every parameter of a routine.
+fn parameter_summary(plugin: &mut Plugin, schema: &str, target: Value) -> Vec<String> {
+    plugin
+        .call_ok("get_routine_parameters", plugin.params_in(schema, target))
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{} {} {} @{}",
+                parameter["mode"].as_str().expect("mode"),
+                parameter["name"].as_str().expect("name"),
+                parameter["data_type"].as_str().expect("data_type"),
+                parameter["ordinal_position"]
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn test_get_routines() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok("get_routines", p.schema_params(json!({})));
-    let routines = result.as_array().expect("expected array");
-    let names: Vec<&str> = routines.iter().filter_map(|r| r["name"].as_str()).collect();
+    let routines = routine_entries(&mut p, "TEST_SCHEMA");
+    let expected = [
+        (
+            "ADJUST_BUDGET(INTEGER, DECIMAL(15,2), DECIMAL(15,2))",
+            "PROCEDURE",
+        ),
+        ("DEPT_EMPLOYEE_COUNT(INTEGER)", "FUNCTION"),
+        ("EMPLOYEES_OF_DEPT(INTEGER)", "FUNCTION"),
+        ("FIXTURE_VERSION()", "FUNCTION"),
+        ("FORMAT_AMOUNT(DECIMAL(10,2))", "FUNCTION"),
+        ("FORMAT_AMOUNT(DECIMAL(10,2), CHAR(3))", "FUNCTION"),
+        ("FULL_NAME(VARCHAR(50), VARCHAR(50))", "FUNCTION"),
+        ("GET_EMPLOYEES_BY_DEPT(INTEGER)", "PROCEDURE"),
+        (
+            "UPDATE_SALARY(INTEGER, DECIMAL(10,2), DECIMAL(10,2))",
+            "PROCEDURE",
+        ),
+    ];
+    for (label, routine_type) in expected {
+        assert!(
+            routines.contains(&(label.to_string(), routine_type.to_string())),
+            "{routine_type} {label} missing: {routines:?}"
+        );
+    }
+}
 
-    assert!(
-        names.contains(&"GET_EMPLOYEES_BY_DEPT"),
-        "procedure GET_EMPLOYEES_BY_DEPT missing: {names:?}"
+#[test]
+fn test_get_routines_reports_types_tabularis_groups_by() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The sidebar files a routine under Functions or Procedures by these two
+    // words; the catalog's own `F` and `P` would leave both groups empty.
+    for schema in ["TEST_SCHEMA", "SYSPROC", "SYSFUN"] {
+        let routines = routine_entries(&mut p, schema);
+        assert!(!routines.is_empty(), "{schema} has routines");
+        for (label, routine_type) in &routines {
+            assert!(
+                routine_type == "FUNCTION" || routine_type == "PROCEDURE",
+                "{schema}.{label} is a {routine_type}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_get_routines_leaves_definitions_out() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let result = p.call_ok("get_routines", p.schema_params(json!({})));
+    for routine in result.as_array().expect("expected array") {
+        assert!(routine["definition"].is_null(), "{routine}");
+    }
+}
+
+#[test]
+fn test_get_routines_empty_schema() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    assert!(routine_entries(&mut p, "EMPTY_SCHEMA").is_empty());
+}
+
+#[test]
+fn test_get_routine_parameters_directions_and_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({
+                "routine_name": "ADJUST_BUDGET",
+                "identity_args": "INTEGER, DECIMAL(15,2), DECIMAL(15,2)"
+            })
+        ),
+        [
+            "IN P_DEPT_ID INTEGER @1",
+            "OUT P_PREVIOUS DECIMAL(15,2) @2",
+            "INOUT P_AMOUNT DECIMAL(15,2) @3",
+        ]
     );
-    assert!(
-        names.contains(&"FULL_NAME"),
-        "function FULL_NAME missing: {names:?}"
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "UPDATE_SALARY" })
+        ),
+        [
+            "IN P_EMP_ID INTEGER @1",
+            "IN P_NEW_SALARY DECIMAL(10,2) @2",
+            "OUT P_OLD_SALARY DECIMAL(10,2) @3",
+        ]
     );
 }
 
 #[test]
-fn test_get_routine_parameters() {
+fn test_get_routine_parameters_function_return_value() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "get_routine_parameters",
-        p.schema_params(json!({ "routine_name": "UPDATE_SALARY" })),
+    // The value a function returns comes first, without a name: that is how
+    // Tabularis recognises it and labels it "Return value".
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FULL_NAME", "identity_args": "VARCHAR(50), VARCHAR(50)" })
+        ),
+        [
+            "OUT  VARCHAR(101) @0",
+            "IN P_FIRST_NAME VARCHAR(50) @1",
+            "IN P_LAST_NAME VARCHAR(50) @2",
+        ]
     );
-    let params = result.as_array().expect("expected array");
-    assert!(params.len() >= 3, "UPDATE_SALARY should have >= 3 params");
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FIXTURE_VERSION", "identity_args": "" })
+        ),
+        ["OUT  VARCHAR(10) @0"]
+    );
+}
 
-    let modes: Vec<&str> = params.iter().filter_map(|p| p["mode"].as_str()).collect();
-    assert!(modes.contains(&"IN"), "should have IN params");
-    assert!(modes.contains(&"OUT"), "should have OUT param");
+#[test]
+fn test_get_routine_parameters_table_function() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The columns of the returned table follow the arguments.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "EMPLOYEES_OF_DEPT", "identity_args": "INTEGER" })
+        ),
+        [
+            "IN P_DEPT_ID INTEGER @1",
+            "OUT EMP_ID INTEGER @2",
+            "OUT LAST_NAME VARCHAR(50) @3",
+        ]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_of_each_overload() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FORMAT_AMOUNT", "identity_args": "DECIMAL(10,2)" })
+        ),
+        ["OUT  VARCHAR(20) @0", "IN P_AMOUNT DECIMAL(10,2) @1"]
+    );
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FORMAT_AMOUNT", "identity_args": "DECIMAL(10,2), CHAR(3)" })
+        ),
+        [
+            "OUT  VARCHAR(24) @0",
+            "IN P_AMOUNT DECIMAL(10,2) @1",
+            "IN P_CURRENCY CHAR(3) @2",
+        ]
+    );
+    // Without a signature the first routine of that name answers: never a
+    // mix of the two.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FORMAT_AMOUNT" })
+        ),
+        ["OUT  VARCHAR(20) @0", "IN P_AMOUNT DECIMAL(10,2) @1"]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_accepts_guide_parameter_name() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The plugin guide documents `routine`; Tabularis sends `routine_name`.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine": "DEPT_EMPLOYEE_COUNT" })
+        ),
+        ["OUT  INTEGER @0", "IN P_DEPT_ID INTEGER @1"]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_of_system_routines() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // An external procedure Db2 ships, with parameters of both directions.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "SYSPROC",
+            json!({ "routine_name": "ADMIN_DROP_SCHEMA" })
+        ),
+        [
+            "IN SCHEMA VARCHAR(128) @1",
+            "IN DROPMODE VARCHAR(128) @2",
+            "INOUT ERRORTABSCHEMA VARCHAR(128) @3",
+            "INOUT ERRORTAB VARCHAR(128) @4",
+        ]
+    );
+    // A built-in function: its argument has no name in the catalog, and is
+    // shown by position rather than passed off as the return value.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "SYSIBM",
+            json!({ "routine_name": "ABS", "identity_args": "DECFLOAT(34)" })
+        ),
+        ["OUT  DECFLOAT(34) @0", "IN $1 DECFLOAT(34) @1"]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_unknown_routine() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let resp = p.call(
+        "get_routine_parameters",
+        p.schema_params(json!({ "routine_name": "NO_SUCH_ROUTINE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "Routine \"TEST_SCHEMA\".\"NO_SUCH_ROUTINE\" does not exist"
+    );
+
+    let resp = p.call(
+        "get_routine_parameters",
+        p.schema_params(json!({ "routine_name": "FORMAT_AMOUNT", "identity_args": "DATE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "Routine \"TEST_SCHEMA\".\"FORMAT_AMOUNT\"(DATE) does not exist"
+    );
+
+    let resp = p.call("get_routine_parameters", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
 }
 
 #[test]
@@ -851,15 +1735,197 @@ fn test_get_routine_definition() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
+    let definition = p.call_ok(
         "get_routine_definition",
-        p.schema_params(json!({ "routine_name": "FULL_NAME" })),
+        p.schema_params(json!({
+            "routine_name": "FULL_NAME",
+            "routine_type": "FUNCTION",
+            "identity_args": "VARCHAR(50), VARCHAR(50)"
+        })),
     );
-    let def = result.as_str().expect("expected string");
-    let upper = def.to_uppercase();
+    let definition = definition.as_str().expect("expected string");
     assert!(
-        upper.contains("RETURN"),
-        "function definition should contain RETURN: {def}"
+        definition.starts_with("CREATE FUNCTION TEST_SCHEMA.FULL_NAME("),
+        "{definition}"
+    );
+    assert!(
+        definition.ends_with("RETURN p_first_name || ' ' || p_last_name;\nEND"),
+        "the whole statement, as it was written: {definition}"
+    );
+
+    let definition = p.call_ok(
+        "get_routine_definition",
+        p.schema_params(json!({
+            "routine_name": "UPDATE_SALARY",
+            "routine_type": "PROCEDURE",
+            "identity_args": "INTEGER, DECIMAL(10,2), DECIMAL(10,2)"
+        })),
+    );
+    let definition = definition.as_str().expect("expected string");
+    assert!(
+        definition.starts_with("CREATE PROCEDURE TEST_SCHEMA.UPDATE_SALARY("),
+        "{definition}"
+    );
+    assert!(
+        definition.contains("OUT p_old_salary DECIMAL(10, 2)"),
+        "{definition}"
+    );
+}
+
+#[test]
+fn test_get_routine_definition_of_each_overload() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let mut definition_of = |identity_args: &str| {
+        p.call_ok(
+            "get_routine_definition",
+            p.schema_params(json!({
+                "routine_name": "FORMAT_AMOUNT",
+                "routine_type": "FUNCTION",
+                "identity_args": identity_args
+            })),
+        )
+        .as_str()
+        .expect("expected string")
+        .to_string()
+    };
+
+    let one_argument = definition_of("DECIMAL(10,2)");
+    assert!(
+        one_argument.contains("RETURNS VARCHAR(20)"),
+        "{one_argument}"
+    );
+    assert!(!one_argument.contains("p_currency"), "{one_argument}");
+
+    let two_arguments = definition_of("DECIMAL(10,2), CHAR(3)");
+    assert!(
+        two_arguments.contains("RETURNS VARCHAR(24)"),
+        "{two_arguments}"
+    );
+    assert!(
+        two_arguments.contains("p_currency CHAR(3)"),
+        "{two_arguments}"
+    );
+}
+
+#[test]
+fn test_get_routine_definition_is_complete() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // A body far longer than one fetch buffer comes back whole.
+    let filler: String = (0..400)
+        .map(|line| format!("    -- line {line:03} of a long routine body, kept as written\n"))
+        .collect();
+    let statement = format!(
+        "CREATE OR REPLACE PROCEDURE TEST_SCHEMA.LONG_ROUTINE(OUT p_total INTEGER)\n\
+         LANGUAGE SQL\nBEGIN\n{filler}    SET p_total = 400;\nEND"
+    );
+    assert!(statement.len() > 20_000);
+    p.query_ok(&statement, Value::Null, 1);
+
+    let definition = p.call_ok(
+        "get_routine_definition",
+        p.schema_params(json!({
+            "routine_name": "LONG_ROUTINE",
+            "routine_type": "PROCEDURE",
+            "identity_args": "INTEGER"
+        })),
+    );
+    p.query_ok("DROP PROCEDURE TEST_SCHEMA.LONG_ROUTINE", Value::Null, 1);
+
+    assert_eq!(definition.as_str().expect("expected string"), statement);
+}
+
+#[test]
+fn test_get_routine_definition_tells_function_from_procedure() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Db2 keeps functions and procedures apart: the two can share a name
+    // and a signature, and `routine_type` is what says which one is meant.
+    p.query_ok(
+        "CREATE OR REPLACE FUNCTION TEST_SCHEMA.TWIN_ROUTINE(p_value INTEGER) \
+         RETURNS INTEGER LANGUAGE SQL RETURN p_value + 1",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "CREATE OR REPLACE PROCEDURE TEST_SCHEMA.TWIN_ROUTINE(INOUT p_value INTEGER) \
+         LANGUAGE SQL BEGIN SET p_value = p_value + 1; END",
+        Value::Null,
+        1,
+    );
+
+    let mut definition_of = |routine_type: &str| {
+        p.call_ok(
+            "get_routine_definition",
+            p.schema_params(json!({
+                "routine_name": "TWIN_ROUTINE",
+                "routine_type": routine_type,
+                "identity_args": "INTEGER"
+            })),
+        )
+        .as_str()
+        .expect("expected string")
+        .to_string()
+    };
+    let function = definition_of("FUNCTION");
+    let procedure = definition_of("PROCEDURE");
+
+    p.query_ok("DROP FUNCTION TEST_SCHEMA.TWIN_ROUTINE", Value::Null, 1);
+    p.query_ok("DROP PROCEDURE TEST_SCHEMA.TWIN_ROUTINE", Value::Null, 1);
+
+    assert!(
+        function.starts_with("CREATE OR REPLACE FUNCTION"),
+        "{function}"
+    );
+    assert!(
+        procedure.starts_with("CREATE OR REPLACE PROCEDURE"),
+        "{procedure}"
+    );
+}
+
+#[test]
+fn test_get_routine_definition_without_stored_source() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // An external routine is compiled code: there is no source to return,
+    // and the answer says so instead of opening an empty editor.
+    let resp = p.call(
+        "get_routine_definition",
+        p.params_in(
+            "SYSPROC",
+            json!({ "routine_name": "ADMIN_CMD", "routine_type": "PROCEDURE", "identity_args": "CLOB(2M)" }),
+        ),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "\"SYSPROC\".\"ADMIN_CMD\"(CLOB(2M)) is an external C routine: \
+         Db2 keeps its compiled code, not its source"
+    );
+
+    let resp = p.call(
+        "get_routine_definition",
+        p.params_in(
+            "SYSIBM",
+            json!({ "routine_name": "ABS", "routine_type": "FUNCTION", "identity_args": "DECFLOAT(34)" }),
+        ),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "\"SYSIBM\".\"ABS\"(DECFLOAT(34)) is built into Db2: it has no definition"
+    );
+
+    let resp = p.call(
+        "get_routine_definition",
+        p.schema_params(json!({ "routine_name": "FULL_NAME", "routine_type": "PROCEDURE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "Procedure \"TEST_SCHEMA\".\"FULL_NAME\" does not exist"
     );
 }
 
@@ -1444,142 +2510,692 @@ fn test_execute_query_with_cte() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — DDL generation (pure SQL generation, no DB2 needed)
+// Tests — DDL generation: every generated statement is run on Db2
 // ---------------------------------------------------------------------------
+
+/// A column as Tabularis's table designer sends it.
+fn column_def(name: &str, data_type: &str) -> Value {
+    json!({
+        "name": name, "data_type": data_type, "is_nullable": true, "is_pk": false,
+        "is_auto_increment": false, "default_value": null
+    })
+}
+
+fn with(mut column: Value, changes: Value) -> Value {
+    for (key, value) in changes.as_object().unwrap() {
+        column[key] = value.clone();
+    }
+    column
+}
+
+/// Asks the plugin for DDL and returns the statements.
+fn generate(p: &mut Plugin, method: &str, args: Value) -> Vec<String> {
+    let result = p.call_ok(method, p.schema_params(args));
+    result
+        .as_array()
+        .unwrap_or_else(|| panic!("{method} should return statements: {result}"))
+        .iter()
+        .map(|statement| statement.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Runs generated statements one by one, as Tabularis does.
+fn run_all(p: &mut Plugin, statements: &[String]) {
+    for statement in statements {
+        p.query_ok(statement, Value::Null, 1);
+    }
+}
+
+/// `[name, full type, nullable, default, identity]` of each column.
+fn described(p: &mut Plugin, table: &str) -> Value {
+    let columns = p.call_ok("get_columns", p.schema_params(json!({ "table": table })));
+    json!(columns
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| json!([
+            column["name"],
+            column
+                .get("full_type")
+                .cloned()
+                .unwrap_or(column["data_type"].clone()),
+            column["is_nullable"],
+            column["default_value"],
+            column["is_auto_increment"],
+        ]))
+        .collect::<Vec<_>>())
+}
+
+const DDL_TABLE: &str = "Ddl Test";
+
+fn drop_ddl_table(p: &mut Plugin) {
+    p.query(
+        &format!("DROP TABLE TEST_SCHEMA.\"{DDL_TABLE}\""),
+        Value::Null,
+        1,
+    );
+}
+
+/// Creates the table the DDL tests alter, through the plugin's own DDL.
+fn create_ddl_table(p: &mut Plugin) -> Vec<String> {
+    drop_ddl_table(p);
+    let statements = generate(
+        p,
+        "get_create_table_sql",
+        json!({
+            "table_name": DDL_TABLE,
+            "columns": [
+                with(column_def("id", "INTEGER"), json!({ "is_pk": true, "is_auto_increment": true, "is_nullable": false })),
+                with(column_def("Unit Price", "DECIMAL(9,2)"), json!({ "is_nullable": false, "default_value": "0" })),
+                with(column_def("select", "VARCHAR(20)"), json!({ "default_value": "'new'", "comment": "It's a reserved word" })),
+                with(column_def("created", "TIMESTAMP"), json!({ "is_nullable": false, "default_value": "CURRENT TIMESTAMP" })),
+                column_def("dept", "INTEGER"),
+            ]
+        }),
+    );
+    run_all(p, &statements);
+    statements
+}
 
 #[test]
 fn test_ddl_create_table() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
+    let statements = create_ddl_table(&mut p);
+    assert_eq!(
+        statements,
+        [
+            "CREATE TABLE \"TEST_SCHEMA\".\"Ddl Test\" (\n  \
+             \"id\" INTEGER NOT NULL GENERATED BY DEFAULT AS IDENTITY,\n  \
+             \"Unit Price\" DECIMAL(9,2) NOT NULL DEFAULT 0,\n  \
+             \"select\" VARCHAR(20) DEFAULT 'new',\n  \
+             \"created\" TIMESTAMP NOT NULL DEFAULT CURRENT TIMESTAMP,\n  \
+             \"dept\" INTEGER,\n  \
+             PRIMARY KEY (\"id\")\n)",
+            "COMMENT ON COLUMN \"TEST_SCHEMA\".\"Ddl Test\".\"select\" IS 'It''s a reserved word'",
+        ]
+    );
+
+    // The table Db2 built is the one that was asked for.
+    assert_eq!(
+        described(&mut p, DDL_TABLE),
+        json!([
+            ["id", "INTEGER", false, null, true],
+            ["Unit Price", "DECIMAL(9,2)", false, "0", false],
+            ["select", "VARCHAR(20)", true, "'new'", false],
+            ["created", "TIMESTAMP", false, "CURRENT TIMESTAMP", false],
+            ["dept", "INTEGER", true, null, false],
+        ])
+    );
+    let columns = p.call_ok(
+        "get_columns",
+        p.schema_params(json!({ "table": DDL_TABLE })),
+    );
+    assert_eq!(columns[0]["is_pk"], json!(true));
+    assert_eq!(columns[2]["comment"], json!("It's a reserved word"));
+
+    // It works: the identity and the defaults fill a row.
+    p.query_ok(
+        "INSERT INTO \"Ddl Test\" (\"dept\") VALUES (1)",
+        Value::Null,
+        1,
+    );
+    let row = p.query_ok(
+        "SELECT \"id\", \"Unit Price\", \"select\" FROM \"Ddl Test\"",
+        Value::Null,
+        1,
+    );
+    assert_eq!(row["rows"], json!([[1, "0.00", "new"]]));
+
+    // Every type the manifest offers can be used in a CREATE TABLE.
+    p.query("DROP TABLE TEST_SCHEMA.DDL_ALL_TYPES", Value::Null, 1);
+    let manifest: Value =
+        serde_json::from_str(include_str!("../.tabularium")).expect("manifest is valid JSON");
+    let columns: Vec<Value> = manifest["data_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, data_type)| {
+            let name = data_type["name"].as_str().unwrap();
+            let sized = match data_type["default_length"].as_str() {
+                Some(length) if data_type["requires_length"] == json!(true) => {
+                    format!("{name}({length})")
+                }
+                _ if data_type["requires_precision"] == json!(true) => format!("{name}(10,2)"),
+                _ => name.to_string(),
+            };
+            column_def(&format!("C{index}"), &sized)
+        })
+        .collect();
+    assert!(columns.len() >= 20, "manifest lists the Db2 types");
+    let statements = generate(
+        &mut p,
+        "get_create_table_sql",
+        json!({ "table_name": "DDL_ALL_TYPES", "columns": columns }),
+    );
+    run_all(&mut p, &statements);
+    let created = p.call_ok(
+        "get_columns",
+        p.schema_params(json!({ "table": "DDL_ALL_TYPES" })),
+    );
+    assert_eq!(created.as_array().unwrap().len(), columns.len());
+    p.query_ok("DROP TABLE TEST_SCHEMA.DDL_ALL_TYPES", Value::Null, 1);
+
+    // A composite primary key.
+    p.query("DROP TABLE TEST_SCHEMA.DDL_COMPOSITE", Value::Null, 1);
+    let statements = generate(
+        &mut p,
         "get_create_table_sql",
         json!({
-            "table_name": "NEW_TABLE",
-            "schema": "TEST_SCHEMA",
+            "table_name": "DDL_COMPOSITE",
             "columns": [
-                { "name": "ID", "data_type": "INTEGER", "is_pk": true, "is_nullable": false, "is_auto_increment": false, "default_value": null },
-                { "name": "NAME", "data_type": "VARCHAR(100)", "is_pk": false, "is_nullable": true, "is_auto_increment": false, "default_value": null }
+                with(column_def("A", "INTEGER"), json!({ "is_pk": true })),
+                with(column_def("B", "VARCHAR(10)"), json!({ "is_pk": true })),
+                column_def("C", "DATE"),
             ]
         }),
     );
-    let stmts = result.as_array().expect("expected array");
-    let sql = stmts[0].as_str().unwrap();
-    assert!(sql.contains("CREATE TABLE"), "should contain CREATE TABLE");
-    assert!(sql.contains("PRIMARY KEY"), "should contain PRIMARY KEY");
-    assert!(sql.contains("\"TEST_SCHEMA\""), "should contain schema");
+    run_all(&mut p, &statements);
+    let keys: Vec<Value> = p
+        .call_ok(
+            "get_columns",
+            p.schema_params(json!({ "table": "DDL_COMPOSITE" })),
+        )
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| json!([column["name"], column["is_pk"], column["is_nullable"]]))
+        .collect();
+    assert_eq!(
+        json!(keys),
+        json!([["A", true, false], ["B", true, false], ["C", false, true]])
+    );
+    p.query_ok("DROP TABLE TEST_SCHEMA.DDL_COMPOSITE", Value::Null, 1);
+
+    // A table needs a column.
+    let resp = p.call(
+        "get_create_table_sql",
+        p.schema_params(json!({ "table_name": "EMPTY", "columns": [] })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("A table needs at least one column")
+    );
+
+    drop_ddl_table(&mut p);
 }
 
 #[test]
 fn test_ddl_add_column() {
     require_db2!();
     let mut p = Plugin::spawn();
+    create_ddl_table(&mut p);
+    p.query_ok(
+        "INSERT INTO \"Ddl Test\" (\"dept\") VALUES (1), (2)",
+        Value::Null,
+        1,
+    );
 
-    let result = p.call_ok(
+    // A nullable column with a comment.
+    let statements = generate(
+        &mut p,
         "get_add_column_sql",
         json!({
-            "table": "EMPLOYEES",
-            "schema": "TEST_SCHEMA",
-            "column": {
-                "name": "PHONE",
-                "data_type": "VARCHAR(20)",
-                "is_pk": false,
-                "is_nullable": true,
-                "is_auto_increment": false,
-                "default_value": null
-            }
+            "table": DDL_TABLE,
+            "column": with(column_def("Qty#", "SMALLINT"), json!({ "comment": "How many" }))
         }),
     );
-    let stmts = result.as_array().expect("expected array");
-    let sql = stmts[0].as_str().unwrap();
-    assert!(sql.contains("ADD COLUMN"), "should contain ADD COLUMN");
-    assert!(sql.contains("PHONE"), "should reference PHONE");
+    assert_eq!(
+        statements,
+        [
+            "ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ADD COLUMN \"Qty#\" SMALLINT",
+            "COMMENT ON COLUMN \"TEST_SCHEMA\".\"Ddl Test\".\"Qty#\" IS 'How many'",
+        ]
+    );
+    run_all(&mut p, &statements);
+
+    // NOT NULL on a table that already has rows: Db2 demands a default, so
+    // one is generated (WITH DEFAULT) unless the user gave one.
+    let statements = generate(
+        &mut p,
+        "get_add_column_sql",
+        json!({ "table": DDL_TABLE, "column": with(column_def("required", "INTEGER"), json!({ "is_nullable": false })) }),
+    );
+    assert_eq!(
+        statements,
+        ["ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ADD COLUMN \"required\" INTEGER NOT NULL WITH DEFAULT"]
+    );
+    run_all(&mut p, &statements);
+
+    let statements = generate(
+        &mut p,
+        "get_add_column_sql",
+        json!({
+            "table": DDL_TABLE,
+            "column": with(column_def("flag", "BOOLEAN"), json!({ "is_nullable": false, "default_value": "TRUE" }))
+        }),
+    );
+    run_all(&mut p, &statements);
+
+    let columns = described(&mut p, DDL_TABLE);
+    assert_eq!(columns[5], json!(["Qty#", "SMALLINT", true, null, false]));
+    assert_eq!(
+        columns[6],
+        json!(["required", "INTEGER", false, "0", false])
+    );
+    assert_eq!(columns[7], json!(["flag", "BOOLEAN", false, "TRUE", false]));
+
+    // The existing rows got the defaults and the table is usable right away.
+    let rows = p.query_ok(
+        "SELECT \"Qty#\", \"required\", \"flag\" FROM \"Ddl Test\" ORDER BY \"id\"",
+        Value::Null,
+        1,
+    );
+    assert_eq!(rows["rows"], json!([[null, 0, true], [null, 0, true]]));
+
+    drop_ddl_table(&mut p);
 }
 
 #[test]
 fn test_ddl_alter_column() {
     require_db2!();
     let mut p = Plugin::spawn();
+    create_ddl_table(&mut p);
+    p.query_ok(
+        "INSERT INTO \"Ddl Test\" (\"dept\") VALUES (1), (2)",
+        Value::Null,
+        1,
+    );
 
-    let result = p.call_ok(
+    let old_select = with(
+        column_def("select", "VARCHAR(20)"),
+        json!({ "default_value": "'new'", "comment": "It's a reserved word" }),
+    );
+
+    // Nothing changed: nothing to run.
+    let statements = generate(
+        &mut p,
+        "get_alter_column_sql",
+        json!({ "table": DDL_TABLE, "old_column": old_select, "new_column": old_select }),
+    );
+    assert!(statements.is_empty(), "{statements:?}");
+
+    // Rename, lengthen, make required, change the default and clear the
+    // comment in one go.
+    let new_status = with(
+        column_def("Status", "VARCHAR(40)"),
+        json!({ "is_nullable": false, "default_value": "'open'" }),
+    );
+    let statements = generate(
+        &mut p,
+        "get_alter_column_sql",
+        json!({ "table": DDL_TABLE, "old_column": old_select, "new_column": new_status }),
+    );
+    assert_eq!(
+        statements,
+        [
+            "ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" RENAME COLUMN \"select\" TO \"Status\"",
+            "ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ALTER COLUMN \"Status\" SET DATA TYPE VARCHAR(40)",
+            "ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ALTER COLUMN \"Status\" SET DEFAULT 'open'",
+            "ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ALTER COLUMN \"Status\" SET NOT NULL",
+            "COMMENT ON COLUMN \"TEST_SCHEMA\".\"Ddl Test\".\"Status\" IS ''",
+            "CALL SYSPROC.ADMIN_CMD('REORG TABLE \"TEST_SCHEMA\".\"Ddl Test\"')",
+        ]
+    );
+    run_all(&mut p, &statements);
+    assert_eq!(
+        described(&mut p, DDL_TABLE)[2],
+        json!(["Status", "VARCHAR(40)", false, "'open'", false])
+    );
+    let columns = p.call_ok(
+        "get_columns",
+        p.schema_params(json!({ "table": DDL_TABLE })),
+    );
+    assert!(columns[2].get("comment").is_none(), "comment cleared");
+
+    // A type change Db2 does not apply in place: without the generated
+    // REORG the table would refuse every statement (SQL0668N).
+    let statements = generate(
+        &mut p,
         "get_alter_column_sql",
         json!({
-            "table": "EMPLOYEES",
-            "schema": "TEST_SCHEMA",
-            "old_column": {
-                "name": "NOTES",
-                "data_type": "CLOB",
-                "is_pk": false,
-                "is_nullable": true,
-                "is_auto_increment": false,
-                "default_value": null
-            },
-            "new_column": {
-                "name": "DESCRIPTION",
-                "data_type": "VARCHAR(2000)",
-                "is_pk": false,
-                "is_nullable": true,
-                "is_auto_increment": false,
-                "default_value": null
-            }
+            "table": DDL_TABLE,
+            "old_column": column_def("dept", "INTEGER"),
+            "new_column": column_def("dept", "BIGINT")
         }),
     );
-    let stmts = result.as_array().expect("expected array");
-    assert!(stmts.len() >= 2, "should produce RENAME + ALTER statements");
-    let all_sql: String = stmts.iter().filter_map(Value::as_str).collect();
-    assert!(all_sql.contains("RENAME COLUMN"), "should contain RENAME");
+    assert_eq!(statements.len(), 2);
+    p.query_ok(&statements[0], Value::Null, 1);
+    let pending = p.query("SELECT COUNT(*) FROM \"Ddl Test\"", Value::Null, 1);
+    let message = pending["error"]["message"].as_str().expect("reorg pending");
+    assert!(message.starts_with("SQL0668N"), "{message}");
     assert!(
-        all_sql.contains("SET DATA TYPE"),
-        "should contain SET DATA TYPE"
+        message
+            .ends_with("run CALL SYSPROC.ADMIN_CMD('REORG TABLE \"TEST_SCHEMA\".\"Ddl Test\"')."),
+        "the error says how to fix it: {message}"
     );
+    p.query_ok(&statements[1], Value::Null, 1);
+    let rows = p.query_ok("SELECT COUNT(*) FROM \"Ddl Test\"", Value::Null, 1);
+    assert_eq!(rows["rows"], json!([[2]]));
+    assert_eq!(
+        described(&mut p, DDL_TABLE)[4],
+        json!(["dept", "BIGINT", true, null, false])
+    );
+
+    // Back to nullable, default dropped.
+    let statements = generate(
+        &mut p,
+        "get_alter_column_sql",
+        json!({ "table": DDL_TABLE, "old_column": new_status, "new_column": column_def("Status", "VARCHAR(40)") }),
+    );
+    run_all(&mut p, &statements);
+    assert_eq!(
+        described(&mut p, DDL_TABLE)[2],
+        json!(["Status", "VARCHAR(40)", true, null, false])
+    );
+
+    // Identity off and on again.
+    let identity = with(
+        column_def("id", "INTEGER"),
+        json!({ "is_pk": true, "is_auto_increment": true, "is_nullable": false }),
+    );
+    let plain = with(
+        column_def("id", "INTEGER"),
+        json!({ "is_pk": true, "is_nullable": false }),
+    );
+    let statements = generate(
+        &mut p,
+        "get_alter_column_sql",
+        json!({ "table": DDL_TABLE, "old_column": identity, "new_column": plain }),
+    );
+    assert_eq!(
+        statements,
+        ["ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ALTER COLUMN \"id\" DROP IDENTITY"]
+    );
+    run_all(&mut p, &statements);
+    assert_eq!(described(&mut p, DDL_TABLE)[0][4], json!(false));
+    let statements = generate(
+        &mut p,
+        "get_alter_column_sql",
+        json!({ "table": DDL_TABLE, "old_column": plain, "new_column": identity }),
+    );
+    run_all(&mut p, &statements);
+    assert_eq!(described(&mut p, DDL_TABLE)[0][4], json!(true));
+
+    // The data survived all of it.
+    let rows = p.query_ok(
+        "SELECT \"id\", \"Status\", \"dept\" FROM \"Ddl Test\" ORDER BY \"id\"",
+        Value::Null,
+        1,
+    );
+    assert_eq!(rows["rows"], json!([[1, "new", 1], [2, "new", 2]]));
+
+    drop_ddl_table(&mut p);
 }
 
 #[test]
 fn test_ddl_create_index() {
     require_db2!();
     let mut p = Plugin::spawn();
+    create_ddl_table(&mut p);
 
-    let result = p.call_ok(
+    let statements = generate(
+        &mut p,
         "get_create_index_sql",
-        json!({
-            "table": "EMPLOYEES",
-            "schema": "TEST_SCHEMA",
-            "index_name": "IDX_TEST",
-            "columns": ["FIRST_NAME", "LAST_NAME"],
-            "is_unique": true
-        }),
+        json!({ "table": DDL_TABLE, "index_name": "idx select", "columns": ["select", "Unit Price"], "is_unique": false }),
     );
-    let stmts = result.as_array().expect("expected array");
-    let sql = stmts[0].as_str().unwrap();
-    assert!(sql.contains("CREATE UNIQUE INDEX"), "should be unique");
-    assert!(
-        sql.contains("\"FIRST_NAME\"") && sql.contains("\"LAST_NAME\""),
-        "should list columns"
+    assert_eq!(
+        statements,
+        ["CREATE INDEX \"TEST_SCHEMA\".\"idx select\" ON \"TEST_SCHEMA\".\"Ddl Test\" (\"select\", \"Unit Price\")"]
     );
+    run_all(&mut p, &statements);
+
+    let statements = generate(
+        &mut p,
+        "get_create_index_sql",
+        json!({ "table": DDL_TABLE, "index_name": "UX_DDL", "columns": ["created"], "is_unique": true }),
+    );
+    assert_eq!(
+        statements,
+        ["CREATE UNIQUE INDEX \"TEST_SCHEMA\".\"UX_DDL\" ON \"TEST_SCHEMA\".\"Ddl Test\" (\"created\")"]
+    );
+    run_all(&mut p, &statements);
+
+    let indexes = p.call_ok(
+        "get_indexes",
+        p.schema_params(json!({ "table": DDL_TABLE })),
+    );
+    let listed: Vec<Value> = indexes
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|index| index["is_primary"] == json!(false))
+        .map(|index| {
+            json!([
+                index["name"],
+                index["column_name"],
+                index["is_unique"],
+                index["seq_in_index"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        json!(listed),
+        json!([
+            ["UX_DDL", "created", true, 1],
+            ["idx select", "select", false, 1],
+            ["idx select", "Unit Price", false, 2],
+        ])
+    );
+
+    // The unique index is enforced.
+    p.query_ok(
+        "INSERT INTO \"Ddl Test\" (\"created\") VALUES ('2024-01-01-00.00.00')",
+        Value::Null,
+        1,
+    );
+    let duplicate = p.query(
+        "INSERT INTO \"Ddl Test\" (\"created\") VALUES ('2024-01-01-00.00.00')",
+        Value::Null,
+        1,
+    );
+    assert!(duplicate["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("SQL0803N"));
+
+    for (name, columns) in [("", json!(["select"])), ("IX", json!([]))] {
+        let resp = p.call(
+            "get_create_index_sql",
+            p.schema_params(json!({ "table": DDL_TABLE, "index_name": name, "columns": columns, "is_unique": false })),
+        );
+        assert!(resp.get("error").is_some(), "{resp}");
+    }
+
+    drop_ddl_table(&mut p);
 }
 
 #[test]
 fn test_ddl_create_foreign_key() {
     require_db2!();
     let mut p = Plugin::spawn();
+    create_ddl_table(&mut p);
 
-    let result = p.call_ok(
+    let statements = generate(
+        &mut p,
         "get_create_foreign_key_sql",
         json!({
-            "table": "PROJECTS",
-            "schema": "TEST_SCHEMA",
-            "fk_name": "FK_TEST",
-            "column": "DEPT_ID",
-            "ref_table": "DEPARTMENTS",
-            "ref_column": "DEPT_ID",
-            "on_delete": "CASCADE",
-            "on_update": null
+            "table": DDL_TABLE, "fk_name": "FK ddl dept", "column": "dept",
+            "ref_table": "DEPARTMENTS", "ref_column": "DEPT_ID",
+            "on_delete": "SET NULL", "on_update": "NO ACTION"
         }),
     );
-    let stmts = result.as_array().expect("expected array");
-    let sql = stmts[0].as_str().unwrap();
-    assert!(sql.contains("FOREIGN KEY"), "should contain FOREIGN KEY");
-    assert!(sql.contains("ON DELETE CASCADE"), "should set ON DELETE");
+    assert_eq!(
+        statements,
+        ["ALTER TABLE \"TEST_SCHEMA\".\"Ddl Test\" ADD CONSTRAINT \"FK ddl dept\" FOREIGN KEY (\"dept\") \
+          REFERENCES \"TEST_SCHEMA\".\"DEPARTMENTS\" (\"DEPT_ID\") ON DELETE SET NULL ON UPDATE NO ACTION"]
+    );
+    run_all(&mut p, &statements);
+
+    let keys = p.call_ok(
+        "get_foreign_keys",
+        p.schema_params(json!({ "table": DDL_TABLE })),
+    );
+    assert_eq!(keys.as_array().unwrap().len(), 1);
+    assert_eq!(keys[0]["name"], json!("FK ddl dept"));
+    assert_eq!(keys[0]["column_name"], json!("dept"));
+    assert_eq!(keys[0]["ref_table"], json!("DEPARTMENTS"));
+    assert_eq!(keys[0]["ref_column"], json!("DEPT_ID"));
+
+    // The constraint is enforced.
+    let orphan = p.query(
+        "INSERT INTO \"Ddl Test\" (\"dept\") VALUES (999)",
+        Value::Null,
+        1,
+    );
+    assert!(orphan["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("SQL0530N"));
+    p.query_ok(
+        "INSERT INTO \"Ddl Test\" (\"dept\") VALUES (1)",
+        Value::Null,
+        1,
+    );
+
+    // Each rule Db2 has for deletes produces a statement Db2 accepts.
+    for (index, rule) in ["NO ACTION", "RESTRICT", "CASCADE"].iter().enumerate() {
+        let name = format!("FK_RULE_{index}");
+        let statements = generate(
+            &mut p,
+            "get_create_foreign_key_sql",
+            json!({
+                "table": DDL_TABLE, "fk_name": name, "column": "dept",
+                "ref_table": "DEPARTMENTS", "ref_column": "DEPT_ID",
+                "on_delete": rule, "on_update": "RESTRICT"
+            }),
+        );
+        run_all(&mut p, &statements);
+    }
+
+    // Rules Db2 does not have are refused instead of generating a statement
+    // that cannot run.
+    let resp = p.call(
+        "get_create_foreign_key_sql",
+        p.schema_params(json!({
+            "table": DDL_TABLE, "fk_name": "FK_BAD", "column": "dept",
+            "ref_table": "DEPARTMENTS", "ref_column": "DEPT_ID",
+            "on_delete": "CASCADE", "on_update": "CASCADE"
+        })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Db2 does not support ON UPDATE CASCADE; use NO ACTION, RESTRICT")
+    );
+
+    drop_ddl_table(&mut p);
+}
+
+#[test]
+fn test_get_table_ddl() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let ddl = p.call_ok(
+        "get_table_ddl",
+        p.schema_params(json!({ "table": "EMPLOYEES" })),
+    );
+    let ddl = ddl.as_str().expect("DDL text");
+    assert!(
+        ddl.starts_with(
+            "CREATE TABLE \"TEST_SCHEMA\".\"EMPLOYEES\" (\n  \
+             \"EMP_ID\" INTEGER NOT NULL GENERATED ALWAYS AS IDENTITY,\n  \
+             \"FIRST_NAME\" VARCHAR(50) NOT NULL,\n"
+        ),
+        "{ddl}"
+    );
+    for expected in [
+        "\"SALARY\" DECIMAL(10,2),\n",
+        "\"IS_ACTIVE\" SMALLINT DEFAULT 1,\n",
+        "\"NOTES\" CLOB(1M),\n",
+        "PRIMARY KEY (\"EMP_ID\")\n);",
+        "CREATE UNIQUE INDEX \"TEST_SCHEMA\".\"IDX_EMP_EMAIL\" ON \"TEST_SCHEMA\".\"EMPLOYEES\" (\"EMAIL\");",
+        "CREATE INDEX \"TEST_SCHEMA\".\"IDX_EMP_LAST_NAME\" ON \"TEST_SCHEMA\".\"EMPLOYEES\" (\"LAST_NAME\");",
+        "COMMENT ON TABLE \"TEST_SCHEMA\".\"EMPLOYEES\" IS 'Employee''s résumé\n所有员工';",
+        "COMMENT ON COLUMN \"TEST_SCHEMA\".\"EMPLOYEES\".\"NOTES\" IS",
+    ] {
+        assert!(ddl.contains(expected), "missing {expected:?} in:\n{ddl}");
+    }
+    assert!(!ddl.contains("FOREIGN KEY"), "foreign keys are left out");
+
+    // The DDL of the type-coverage table, run under another name, rebuilds
+    // a table with the same columns.
+    let ddl = p.call_ok(
+        "get_table_ddl",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST" })),
+    );
+    let ddl = ddl.as_str().unwrap();
+    assert!(
+        ddl.contains("\"COL_COMPUTED\" INTEGER GENERATED ALWAYS AS (LENGTH(COL_VARCHAR))"),
+        "{ddl}"
+    );
+    assert!(ddl.contains("\"COL_HIDDEN\" TIMESTAMP NOT NULL GENERATED ALWAYS FOR EACH ROW ON UPDATE AS ROW CHANGE TIMESTAMP IMPLICITLY HIDDEN"), "{ddl}");
+    assert!(
+        ddl.contains("\"COL_BIT_DATA\" VARCHAR(16) FOR BIT DATA"),
+        "{ddl}"
+    );
+    assert!(ddl.contains("\"COL_TIMESTAMP12\" TIMESTAMP(12)"), "{ddl}");
+
+    p.query("DROP TABLE TEST_SCHEMA.TYPE_METADATA_COPY", Value::Null, 1);
+    let copy = ddl.replace("\"TYPE_METADATA_TEST\"", "\"TYPE_METADATA_COPY\"");
+    for statement in copy.split(";\n\n") {
+        p.query_ok(statement, Value::Null, 1);
+    }
+    let original = p.call_ok(
+        "get_columns",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST" })),
+    );
+    let rebuilt = p.call_ok(
+        "get_columns",
+        p.schema_params(json!({ "table": "TYPE_METADATA_COPY" })),
+    );
+    assert_eq!(rebuilt, original, "the rebuilt table has the same columns");
+    p.query_ok("DROP TABLE TEST_SCHEMA.TYPE_METADATA_COPY", Value::Null, 1);
+
+    // Delimited names, and a composite key.
+    let ddl = p.call_ok(
+        "get_table_ddl",
+        p.params_in("Mixed Case", json!({ "table": "Order Details" })),
+    );
+    assert!(ddl.as_str().unwrap().starts_with(
+        "CREATE TABLE \"Mixed Case\".\"Order Details\" (\n  \"Order Id\" INTEGER NOT NULL,\n  \
+         \"Unit Price\" DECIMAL(9,2) NOT NULL DEFAULT 0,\n  \"select\" VARCHAR(20),"
+    ));
+    let ddl = p.call_ok(
+        "get_table_ddl",
+        p.schema_params(json!({ "table": "EMP_PROJECTS" })),
+    );
+    assert!(ddl
+        .as_str()
+        .unwrap()
+        .contains("PRIMARY KEY (\"EMP_ID\", \"PROJECT_ID\")"));
+
+    // Not a table.
+    let resp = p.call(
+        "get_table_ddl",
+        p.schema_params(json!({ "table": "V_EMP_DETAILS" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        json!("\"TEST_SCHEMA\".\"V_EMP_DETAILS\" is a view, not a table")
+    );
+    let resp = p.call("get_table_ddl", p.schema_params(json!({ "table": "NOPE" })));
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Table \"TEST_SCHEMA\".\"NOPE\" was not found")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1624,8 +3240,7 @@ fn test_crud_insert_update_delete() {
         "update_record",
         p.schema_params(json!({
             "table": "CRUD_TEST",
-            "pk_col": "ID",
-            "pk_val": 100,
+            "pk_map": { "ID": 100 },
             "col_name": "NAME",
             "new_val": "Updated Record"
         })),
@@ -1648,8 +3263,7 @@ fn test_crud_insert_update_delete() {
         "delete_record",
         p.schema_params(json!({
             "table": "CRUD_TEST",
-            "pk_col": "ID",
-            "pk_val": 100
+            "pk_map": { "ID": 100 }
         })),
     );
 
@@ -1666,6 +3280,1207 @@ fn test_crud_insert_update_delete() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests — Insert record
+// ---------------------------------------------------------------------------
+
+/// Rows the insert tests add to TYPE_METADATA_TEST use ids from 1000 up, so
+/// they can be removed without touching the fixture rows.
+fn delete_inserted_type_rows(p: &mut Plugin) {
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID >= 1000",
+        Value::Null,
+        1,
+    );
+}
+
+/// One row of TYPE_METADATA_TEST as a `column -> value` map.
+fn type_row(p: &mut Plugin, id: i64) -> serde_json::Map<String, Value> {
+    let result = p.query_ok(
+        &format!("SELECT * FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = {id}"),
+        json!(1),
+        1,
+    );
+    let columns = result["columns"].as_array().unwrap();
+    let row = result["rows"][0]
+        .as_array()
+        .unwrap_or_else(|| panic!("row {id} not found"));
+    columns
+        .iter()
+        .zip(row)
+        .map(|(column, value)| (column.as_str().unwrap().to_string(), value.clone()))
+        .collect()
+}
+
+#[test]
+fn test_insert_record_all_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+
+    // Every value as a string, which is what the grid sends for a typed cell.
+    let inserted = p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": "1000",
+                "COL_CHAR": "xyz",
+                "COL_VARCHAR": "O'Brien \"q\" 所有; DROP TABLE X; --",
+                "COL_BIT_DATA": "CAFEBABE",
+                "COL_GRAPHIC": "グラ",
+                "COL_VARGRAPHIC": "变长",
+                "COL_SMALLINT": "7",
+                "COL_INTEGER": "-42",
+                "COL_DECIMAL": "1234.5678",
+                "COL_DECFLOAT16": "1.5",
+                "COL_DECFLOAT34": "12345678901234567890.123456789",
+                "COL_REAL": "1.25",
+                "COL_DOUBLE": "75000.5",
+                "COL_BOOLEAN": "true",
+                "COL_DATE": "2024-02-29",
+                "COL_TIME": "13:45:10",
+                "COL_TIMESTAMP": "2024-02-29T13:45:10.123456",
+                "COL_TIMESTAMP12": "2024-02-29 13:45:10.123456789012",
+                "COL_CLOB": "clob",
+                "COL_DBCLOB": "dbclob 文本",
+                "COL_BLOB": "BLOB:4:application/octet-stream:yv66vg==",
+                "COL_BINARY": "00112233445566778899AABBCCDDEEFF",
+                "COL_VARBINARY": "DEADBEEF",
+                "COL_XML": "<a><b>1</b></a>"
+            }
+        })),
+    );
+    assert_eq!(inserted, json!(1), "one row inserted");
+
+    let row = type_row(&mut p, 1000);
+    for (name, expected) in [
+        ("ID", json!(1000)),
+        ("COL_CHAR", json!("xyz       ")),
+        ("COL_VARCHAR", json!("O'Brien \"q\" 所有; DROP TABLE X; --")),
+        ("COL_BIT_DATA", json!("CAFEBABE")),
+        ("COL_GRAPHIC", json!("グラ  ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!(7)),
+        ("COL_INTEGER", json!(-42)),
+        ("COL_DECIMAL", json!("1234.5678")),
+        ("COL_DECFLOAT16", json!("1.5")),
+        ("COL_DECFLOAT34", json!("12345678901234567890.123456789")),
+        ("COL_REAL", json!(1.25)),
+        ("COL_DOUBLE", json!(75000.5)),
+        ("COL_BOOLEAN", json!(true)),
+        ("COL_DATE", json!("2024-02-29")),
+        ("COL_TIME", json!("13:45:10")),
+        ("COL_TIMESTAMP", json!("2024-02-29 13:45:10.123456")),
+        ("COL_TIMESTAMP12", json!("2024-02-29 13:45:10.123456789012")),
+        ("COL_CLOB", json!("clob")),
+        ("COL_DBCLOB", json!("dbclob 文本")),
+        (
+            "COL_BLOB",
+            json!("BLOB:4:application/octet-stream:yv66vg=="),
+        ),
+        ("COL_BINARY", json!("00112233445566778899AABBCCDDEEFF")),
+        ("COL_VARBINARY", json!("DEADBEEF")),
+        // Computed by Db2 from COL_VARCHAR.
+        ("COL_COMPUTED", json!(36)),
+    ] {
+        assert_eq!(row[name], expected, "{name}");
+    }
+    assert!(row["COL_XML"]
+        .as_str()
+        .unwrap()
+        .ends_with("<a><b>1</b></a>"));
+
+    // The same row from native JSON values.
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1001, "COL_SMALLINT": 3, "COL_INTEGER": -1, "COL_DECIMAL": 12.5,
+                "COL_DOUBLE": 1e3, "COL_BOOLEAN": false, "COL_VARCHAR": 12
+            }
+        })),
+    );
+    let row = type_row(&mut p, 1001);
+    assert_eq!(row["COL_SMALLINT"], json!(3));
+    assert_eq!(row["COL_DECIMAL"], json!("12.5000"));
+    assert_eq!(row["COL_DOUBLE"], json!(1000.0));
+    assert_eq!(row["COL_BOOLEAN"], json!(false));
+    assert_eq!(row["COL_VARCHAR"], json!("12"));
+
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_insert_record_nulls_and_defaults() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+
+    // NULL, "use the default", and a cleared numeric / date / boolean cell
+    // (an empty string), which means "no value" rather than 0 or ''.
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1002,
+                "COL_CHAR": "__USE_DEFAULT__",
+                "COL_SMALLINT": "__USE_DEFAULT__",
+                "COL_VARCHAR": null,
+                "COL_INTEGER": "",
+                "COL_DECIMAL": "  ",
+                "COL_DATE": "",
+                "COL_BOOLEAN": "",
+                "COL_CLOB": "",
+                "COL_BLOB": null
+            }
+        })),
+    );
+    let row = type_row(&mut p, 1002);
+    assert_eq!(row["COL_CHAR"], json!("N/A       "), "column default");
+    assert_eq!(row["COL_SMALLINT"], json!(1), "column default");
+    for name in [
+        "COL_VARCHAR",
+        "COL_INTEGER",
+        "COL_DECIMAL",
+        "COL_DATE",
+        "COL_BOOLEAN",
+        "COL_BLOB",
+    ] {
+        assert_eq!(row[name], Value::Null, "{name}");
+    }
+    // For text, an empty string is an empty string.
+    assert_eq!(row["COL_CLOB"], json!(""));
+    // A column that was not mentioned gets its default.
+    assert!(row["COL_TIMESTAMP"].as_str().is_some());
+
+    // No values at all: a row of defaults (the identity generates the key).
+    let before = p.query_ok(
+        "SELECT MAX(ID) FROM TEST_SCHEMA.TYPE_METADATA_TEST",
+        Value::Null,
+        1,
+    );
+    let inserted = p.call_ok(
+        "insert_record",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST", "data": {} })),
+    );
+    assert_eq!(inserted, json!(1));
+    let after = p.query_ok(
+        "SELECT ID, COL_CHAR, COL_BOOLEAN FROM TEST_SCHEMA.TYPE_METADATA_TEST ORDER BY COL_TIMESTAMP DESC",
+        json!(1),
+        1,
+    );
+    assert_eq!(after["rows"][0][1], json!("N/A       "));
+    assert_eq!(after["rows"][0][2], json!(false));
+    let generated = after["rows"][0][0].as_i64().unwrap();
+    assert_ne!(Some(generated), before["rows"][0][0].as_i64());
+    p.query_ok(
+        &format!("DELETE FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = {generated}"),
+        Value::Null,
+        1,
+    );
+
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_insert_record_large_values() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+
+    // A 280,000-byte CLOB: far beyond the 32,672 bytes a string constant
+    // may hold, so it only works as a bound parameter.
+    let clob = "€uro-".repeat(40_000);
+
+    // A 1 MiB BLOB handed over as a file, the way Tabularis passes a picked
+    // or uploaded file.
+    let bytes: Vec<u8> = (0..1_048_576u32).map(|i| (i * 31 % 251) as u8).collect();
+    let path = std::env::temp_dir().join(format!("db2-plugin-it-{}.bin", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1003,
+                "COL_CLOB": clob,
+                "COL_BLOB": format!("BLOB_FILE_REF:{}:application/octet-stream:{}", bytes.len(), path.display())
+            },
+            "max_blob_size": 4 * 1024 * 1024
+        })),
+    );
+
+    let stored = p.query_ok(
+        "SELECT LENGTH(COL_CLOB), LENGTH(COL_BLOB), COL_CLOB, COL_BLOB FROM TEST_SCHEMA.TYPE_METADATA_TEST WHERE ID = 1003",
+        json!(1),
+        1,
+    );
+    let row = &stored["rows"][0];
+    assert_eq!(row[0], json!(280_000), "bytes of text stored");
+    assert_eq!(row[1], json!(1_048_576), "bytes stored");
+    assert_eq!(row[2].as_str().unwrap(), clob);
+    // In a result set a BLOB is a preview with its true size.
+    assert!(row[3].as_str().unwrap().starts_with("BLOB:1048576:"));
+
+    let key =
+        json!({ "table": "TYPE_METADATA_TEST", "col_name": "COL_BLOB", "pk_map": { "ID": 1003 } });
+
+    // fetch_blob_as_data_url returns every byte.
+    let wire = p.call_ok("fetch_blob_as_data_url", p.schema_params(key.clone()));
+    let wire = wire.as_str().unwrap();
+    let prefix = "BLOB:1048576:application/octet-stream:";
+    assert!(wire.starts_with(prefix), "{}", &wire[..60]);
+    assert_eq!(wire.len() - prefix.len(), 1_048_576_usize.div_ceil(3) * 4);
+
+    // save_blob_to_file writes the same bytes back to disk.
+    let out = std::env::temp_dir().join(format!("db2-plugin-it-{}.out", std::process::id()));
+    let mut save = key.clone();
+    save["file_path"] = json!(out.display().to_string());
+    let saved = p.call_ok("save_blob_to_file", p.schema_params(save));
+    assert_eq!(saved, Value::Null);
+    assert_eq!(std::fs::read(&out).unwrap(), bytes, "BLOB round trip");
+
+    // A file larger than the host allows is refused before it is read.
+    let resp = p.call(
+        "insert_record",
+        p.schema_params(json!({
+            "table": "TYPE_METADATA_TEST",
+            "data": {
+                "ID": 1004,
+                "COL_BLOB": format!("BLOB_FILE_REF:{}:application/octet-stream:{}", bytes.len(), path.display())
+            },
+            "max_blob_size": 1024
+        })),
+    );
+    let message = resp["error"]["message"].as_str().expect("size error");
+    assert!(
+        message.contains("exceeds the maximum allowed BLOB size"),
+        "{message}"
+    );
+
+    // A row that does not exist, a NULL value and a missing key are errors.
+    let mut missing = key.clone();
+    missing["pk_map"] = json!({ "ID": 424242 });
+    let resp = p.call("fetch_blob_as_data_url", p.schema_params(missing));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("No value found"));
+    let mut keyless = key;
+    keyless["pk_map"] = json!({});
+    let resp = p.call("fetch_blob_as_data_url", p.schema_params(keyless));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Cannot identify the row"));
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&out).unwrap();
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_insert_record_delimited_names() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let cleanup = "DELETE FROM \"Mixed Case\".\"Order Details\" WHERE \"Order Id\" = 2";
+    p.query_ok(cleanup, Value::Null, 1);
+
+    let inserted = p.call_ok(
+        "insert_record",
+        p.params_in(
+            "Mixed Case",
+            json!({
+                "table": "Order Details",
+                "data": {
+                    "Order Id": 2, "Unit Price": "3.50", "select": "sel",
+                    "Qty#": "4", "O'Brien": "it's", "Größe": "klein"
+                }
+            }),
+        ),
+    );
+    assert_eq!(inserted, json!(1));
+
+    let row = p.query_ok(
+        "SELECT * FROM \"Mixed Case\".\"Order Details\" WHERE \"Order Id\" = 2",
+        json!(1),
+        1,
+    );
+    assert_eq!(row["rows"], json!([[2, "3.50", "sel", 4, "it's", "klein"]]));
+    p.query_ok(cleanup, Value::Null, 1);
+}
+
+#[test]
+fn test_insert_record_constraint_violations() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
+        Value::Null,
+        1,
+    );
+
+    let mut error = |table: &str, data: Value| -> String {
+        let resp = p.call(
+            "insert_record",
+            p.schema_params(json!({ "table": table, "data": data })),
+        );
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected an error: {resp}"))
+            .to_string()
+    };
+
+    // Rejected before reaching Db2: text where a number belongs.
+    assert_eq!(
+        error("CRUD_TEST", json!({ "ID": "abc", "NAME": "x" })),
+        "'abc' is not a valid number for column \"ID\""
+    );
+    assert_eq!(
+        error(
+            "CRUD_TEST",
+            json!({ "ID": "1; DROP TABLE TEST_SCHEMA.CRUD_TEST", "NAME": "x" })
+        ),
+        "'1; DROP TABLE TEST_SCHEMA.CRUD_TEST' is not a valid number for column \"ID\""
+    );
+
+    // NOT NULL: Db2 identifies the column by internal numbers; the message
+    // names it.
+    assert_eq!(
+        error("CRUD_TEST", json!({ "NAME": "x" })),
+        "SQL0407N Assignment of a NULL value to a NOT NULL column \"ID\" is not allowed. SQLSTATE=23502"
+    );
+    let required = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "EMAIL": "nn@example.com", "HIRE_DATE": "2024-01-01" }),
+    );
+    assert!(
+        required.contains("NOT NULL column \"LAST_NAME\""),
+        "{required}"
+    );
+
+    // Primary key.
+    let resp = p.call(
+        "insert_record",
+        p.schema_params(json!({ "table": "CRUD_TEST", "data": { "ID": 801, "NAME": "x" } })),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let mut error = |table: &str, data: Value| -> String {
+        let resp = p.call(
+            "insert_record",
+            p.schema_params(json!({ "table": table, "data": data })),
+        );
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected an error: {resp}"))
+            .to_string()
+    };
+    let duplicate = error("CRUD_TEST", json!({ "ID": 801, "NAME": "x" }));
+    assert!(duplicate.starts_with("SQL0803N"), "{duplicate}");
+    assert!(duplicate.ends_with("SQLSTATE=23505"), "{duplicate}");
+
+    // Unique index.
+    let unique = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "john.doe@example.com", "HIRE_DATE": "2024-01-01" }),
+    );
+    assert!(unique.starts_with("SQL0803N"), "{unique}");
+
+    // Foreign key: the constraint is named.
+    let foreign = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "fk@example.com", "HIRE_DATE": "2024-01-01", "DEPT_ID": 999 }),
+    );
+    assert!(foreign.starts_with("SQL0530N"), "{foreign}");
+    assert!(
+        foreign.contains("TEST_SCHEMA.EMPLOYEES.FK_EMP_DEPT"),
+        "{foreign}"
+    );
+    assert!(foreign.ends_with("SQLSTATE=23503"), "{foreign}");
+
+    // A value that does not fit, a value for a GENERATED ALWAYS column, a
+    // malformed date, an unknown column and an unknown table.
+    let long = error("CRUD_TEST", json!({ "ID": 802, "NAME": "x".repeat(200) }));
+    assert!(long.contains("SQLSTATE=22001"), "{long}");
+    let generated = error(
+        "EMPLOYEES",
+        json!({ "EMP_ID": 77, "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "id@example.com", "HIRE_DATE": "2024-01-01" }),
+    );
+    assert!(generated.starts_with("SQL0798N"), "{generated}");
+    let date = error(
+        "EMPLOYEES",
+        json!({ "FIRST_NAME": "a", "LAST_NAME": "b", "EMAIL": "d@example.com", "HIRE_DATE": "not a date" }),
+    );
+    assert!(date.starts_with("SQL0180N"), "{date}");
+    let column = error("CRUD_TEST", json!({ "ID": 803, "NOPE": "x" }));
+    assert!(column.starts_with("SQL0206N \"NOPE\""), "{column}");
+    let table = error("NOPE_TABLE", json!({ "ID": 1 }));
+    assert_eq!(
+        table,
+        "SQL0204N \"TEST_SCHEMA.NOPE_TABLE\" is an undefined name. SQLSTATE=42704"
+    );
+
+    // A BLOB preview (fewer bytes than its header announces) is not written.
+    let preview = error(
+        "TYPE_METADATA_TEST",
+        json!({ "ID": 1005, "COL_BLOB": "BLOB:50000:application/octet-stream:yv66vg==" }),
+    );
+    assert!(preview.contains("preview"), "{preview}");
+
+    // Nothing was inserted by the failed attempts.
+    let count = p.query_ok(
+        "SELECT COUNT(*) FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
+        Value::Null,
+        1,
+    );
+    assert_eq!(count["rows"], json!([[1]]));
+    let employees = p.query_ok("SELECT COUNT(*) FROM TEST_SCHEMA.EMPLOYEES", Value::Null, 1);
+    assert_eq!(employees["rows"], json!([[6]]));
+
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 800 AND 899",
+        Value::Null,
+        1,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Update record
+// ---------------------------------------------------------------------------
+
+/// `update_record` in TEST_SCHEMA; returns the raw response.
+fn update(p: &mut Plugin, table: &str, pk_map: Value, column: &str, value: Value) -> Value {
+    p.call(
+        "update_record",
+        p.schema_params(json!({
+            "table": table, "pk_map": pk_map, "col_name": column, "new_val": value
+        })),
+    )
+}
+
+fn update_error(p: &mut Plugin, table: &str, pk_map: Value, column: &str, value: Value) -> String {
+    let resp = update(p, table, pk_map, column, value);
+    resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error: {resp}"))
+        .to_string()
+}
+
+#[test]
+fn test_update_record_all_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    delete_inserted_type_rows(&mut p);
+    p.call_ok(
+        "insert_record",
+        p.schema_params(json!({ "table": "TYPE_METADATA_TEST", "data": { "ID": 1010 } })),
+    );
+
+    // One column at a time, as the grid does, each value as typed text.
+    for (column, value) in [
+        ("COL_CHAR", json!("upd")),
+        ("COL_VARCHAR", json!("O'Brien — 所有")),
+        ("COL_BIT_DATA", json!("0A0B0C")),
+        ("COL_GRAPHIC", json!("グラ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!("-5")),
+        ("COL_INTEGER", json!("123456")),
+        ("COL_DECIMAL", json!("99.9900")),
+        ("COL_DECFLOAT16", json!("2.5")),
+        ("COL_DECFLOAT34", json!("0.000000000000000000001")),
+        ("COL_REAL", json!("2.5")),
+        ("COL_DOUBLE", json!("-0.125")),
+        ("COL_BOOLEAN", json!("true")),
+        ("COL_DATE", json!("2025-12-31")),
+        ("COL_TIME", json!("23:59:59")),
+        ("COL_TIMESTAMP", json!("2025-12-31T23:59:59.999999")),
+        ("COL_TIMESTAMP12", json!("2025-12-31 23:59:59.999999999999")),
+        ("COL_CLOB", json!("x".repeat(40_000))),
+        ("COL_DBCLOB", json!("文本")),
+        ("COL_BLOB", json!("BLOB:3:application/octet-stream:AQID")),
+        ("COL_BINARY", json!("FFEEDDCCBBAA99887766554433221100")),
+        ("COL_VARBINARY", json!("00FF")),
+        ("COL_XML", json!("<doc id=\"1\"/>")),
+    ] {
+        let resp = update(
+            &mut p,
+            "TYPE_METADATA_TEST",
+            json!({ "ID": 1010 }),
+            column,
+            value,
+        );
+        assert_eq!(resp["result"], json!(1), "{column}: {resp}");
+    }
+
+    let row = type_row(&mut p, 1010);
+    for (name, expected) in [
+        ("COL_CHAR", json!("upd       ")),
+        ("COL_VARCHAR", json!("O'Brien — 所有")),
+        ("COL_BIT_DATA", json!("0A0B0C")),
+        ("COL_GRAPHIC", json!("グラ  ")),
+        ("COL_VARGRAPHIC", json!("变长")),
+        ("COL_SMALLINT", json!(-5)),
+        ("COL_INTEGER", json!(123456)),
+        ("COL_DECIMAL", json!("99.9900")),
+        ("COL_DECFLOAT16", json!("2.5")),
+        ("COL_DECFLOAT34", json!("1E-21")),
+        ("COL_REAL", json!(2.5)),
+        ("COL_DOUBLE", json!(-0.125)),
+        ("COL_BOOLEAN", json!(true)),
+        ("COL_DATE", json!("2025-12-31")),
+        ("COL_TIME", json!("23:59:59")),
+        ("COL_TIMESTAMP", json!("2025-12-31 23:59:59.999999")),
+        ("COL_TIMESTAMP12", json!("2025-12-31 23:59:59.999999999999")),
+        ("COL_CLOB", json!("x".repeat(40_000))),
+        ("COL_DBCLOB", json!("文本")),
+        ("COL_BLOB", json!("BLOB:3:application/octet-stream:AQID")),
+        ("COL_BINARY", json!("FFEEDDCCBBAA99887766554433221100")),
+        ("COL_VARBINARY", json!("00FF")),
+        // Recomputed by Db2 from the new COL_VARCHAR (its length in bytes).
+        ("COL_COMPUTED", json!(18)),
+    ] {
+        assert_eq!(row[name], expected, "{name}");
+    }
+    assert!(row["COL_XML"]
+        .as_str()
+        .unwrap()
+        .ends_with("<doc id=\"1\"/>"));
+
+    // NULL, the column default, and a cleared numeric cell.
+    for (column, value, expected) in [
+        ("COL_VARCHAR", Value::Null, Value::Null),
+        ("COL_BLOB", Value::Null, Value::Null),
+        ("COL_CHAR", json!("__USE_DEFAULT__"), json!("N/A       ")),
+        ("COL_SMALLINT", json!("__USE_DEFAULT__"), json!(1)),
+        ("COL_INTEGER", json!(""), Value::Null),
+        ("COL_DATE", json!(""), Value::Null),
+    ] {
+        let resp = update(
+            &mut p,
+            "TYPE_METADATA_TEST",
+            json!({ "ID": 1010 }),
+            column,
+            value,
+        );
+        assert_eq!(resp["result"], json!(1), "{column}: {resp}");
+        assert_eq!(type_row(&mut p, 1010)[column], expected, "{column}");
+    }
+
+    delete_inserted_type_rows(&mut p);
+}
+
+#[test]
+fn test_update_record_keys() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Composite primary key: both columns identify the row.
+    let role = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT EMP_ID, PROJECT_ID, ROLE FROM TEST_SCHEMA.EMP_PROJECTS ORDER BY EMP_ID, PROJECT_ID",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    let before = role(&mut p);
+    let resp = update(
+        &mut p,
+        "EMP_PROJECTS",
+        json!({ "EMP_ID": 1, "PROJECT_ID": 2 }),
+        "ROLE",
+        json!("OWNER"),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let after = role(&mut p);
+    let changed: Vec<_> = before
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(after.as_array().unwrap())
+        .filter(|(old, new)| old != new)
+        .collect();
+    assert_eq!(changed.len(), 1, "exactly one row changed");
+    assert_eq!(changed[0].1, &json!([1, 2, "OWNER"]));
+    update(
+        &mut p,
+        "EMP_PROJECTS",
+        json!({ "EMP_ID": 1, "PROJECT_ID": 2 }),
+        "ROLE",
+        json!("MEMBER"),
+    );
+    assert_eq!(role(&mut p), before);
+
+    // Key values arrive as shown in the grid: a number as text works too.
+    let resp = update(
+        &mut p,
+        "DEPARTMENTS",
+        json!({ "DEPT_ID": "4" }),
+        "LOCATION",
+        json!("Building Z"),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    update(
+        &mut p,
+        "DEPARTMENTS",
+        json!({ "DEPT_ID": 4 }),
+        "LOCATION",
+        json!("Building A"),
+    );
+
+    // The single key pair Tabularis sent before `pk_map` existed.
+    let resp = p.call(
+        "update_record",
+        p.schema_params(json!({
+            "table": "DEPARTMENTS", "pk_col": "DEPT_ID", "pk_val": 4,
+            "col_name": "LOCATION", "new_val": "Building A"
+        })),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+
+    // Changing the key column itself.
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID IN (910, 911)",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.CRUD_TEST (ID, NAME) VALUES (910, 'moved')",
+        Value::Null,
+        1,
+    );
+    let resp = update(&mut p, "CRUD_TEST", json!({ "ID": 910 }), "ID", json!(911));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let moved = p.query_ok(
+        "SELECT ID FROM TEST_SCHEMA.CRUD_TEST WHERE NAME = 'moved'",
+        Value::Null,
+        1,
+    );
+    assert_eq!(moved["rows"], json!([[911]]));
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID IN (910, 911)",
+        Value::Null,
+        1,
+    );
+
+    // Delimited names in the table, the key and the column.
+    let resp = p.call(
+        "update_record",
+        p.params_in(
+            "Mixed Case",
+            json!({
+                "table": "Order Details", "pk_map": { "Order Id": 1 },
+                "col_name": "O'Brien", "new_val": "it's \"quoted\""
+            }),
+        ),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let row = p.query_ok(
+        "SELECT \"O'Brien\" FROM \"Mixed Case\".\"Order Details\" WHERE \"Order Id\" = 1",
+        Value::Null,
+        1,
+    );
+    assert_eq!(row["rows"], json!([["it's \"quoted\""]]));
+    p.call_ok(
+        "update_record",
+        p.params_in(
+            "Mixed Case",
+            json!({
+                "table": "Order Details", "pk_map": { "Order Id": 1 },
+                "col_name": "O'Brien", "new_val": "it's"
+            }),
+        ),
+    );
+}
+
+#[test]
+fn test_update_record_table_without_primary_key() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let rows = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT CODE, QTY, CAST(NOTE AS VARCHAR(100)), CREATED FROM TEST_SCHEMA.KEYLESS_TEST ORDER BY CODE, QTY",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    let original = rows(&mut p);
+    assert_eq!(
+        original,
+        json!([
+            ["A", 1, "first", "2024-01-01"],
+            ["A", 1, "first", "2024-01-01"],
+            ["B", null, null, null],
+            ["C", 3, "third", "2024-03-03"]
+        ])
+    );
+
+    // Without any key the row cannot be identified: a clear error instead
+    // of the invalid `WHERE "" = ...` this used to generate (issue #4).
+    for keys in [json!({}), Value::Null] {
+        let message = update_error(&mut p, "KEYLESS_TEST", keys, "QTY", json!(5));
+        assert_eq!(
+            message,
+            "Cannot identify the row in \"TEST_SCHEMA\".\"KEYLESS_TEST\": no key values were \
+             provided. The table needs a primary key, or every column of the row must be loaded."
+        );
+    }
+    let resp = p.call(
+        "update_record",
+        p.schema_params(json!({
+            "table": "KEYLESS_TEST", "pk_col": "", "pk_val": null, "col_name": "QTY", "new_val": 5
+        })),
+    );
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Cannot identify the row"));
+    assert_eq!(rows(&mut p), original, "nothing changed");
+
+    // What Tabularis sends for a keyless table: every column of the row.
+    // Two rows are identical; only one of them is updated. The CLOB is not
+    // comparable and is left out of the match.
+    let twin = json!({ "CODE": "A", "QTY": 1, "NOTE": "first", "CREATED": "2024-01-01" });
+    let resp = update(&mut p, "KEYLESS_TEST", twin.clone(), "QTY", json!("10"));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(
+        rows(&mut p),
+        json!([
+            ["A", 1, "first", "2024-01-01"],
+            ["A", 10, "first", "2024-01-01"],
+            ["B", null, null, null],
+            ["C", 3, "third", "2024-03-03"]
+        ])
+    );
+
+    // NULL key values are matched with IS NULL.
+    let nulls = json!({ "CODE": "B", "QTY": null, "NOTE": null, "CREATED": null });
+    let resp = update(&mut p, "KEYLESS_TEST", nulls, "NOTE", json!("filled in"));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(rows(&mut p)[2], json!(["B", null, "filled in", null]));
+
+    // Restore the fixture rows.
+    let changed = json!({ "CODE": "A", "QTY": 10, "NOTE": "first", "CREATED": "2024-01-01" });
+    update(&mut p, "KEYLESS_TEST", changed, "QTY", json!(1));
+    let filled = json!({ "CODE": "B", "QTY": null, "CREATED": null });
+    update(&mut p, "KEYLESS_TEST", filled, "NOTE", Value::Null);
+    assert_eq!(rows(&mut p), original);
+}
+
+#[test]
+fn test_update_record_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let employee = json!({ "EMP_ID": 1 });
+    let snapshot = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT * FROM TEST_SCHEMA.EMPLOYEES ORDER BY EMP_ID",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    let before = snapshot(&mut p);
+
+    // A key that matches no row.
+    assert_eq!(
+        update_error(
+            &mut p,
+            "EMPLOYEES",
+            json!({ "EMP_ID": 424242 }),
+            "LAST_NAME",
+            json!("x")
+        ),
+        "No row in \"TEST_SCHEMA\".\"EMPLOYEES\" matches the key values: it was changed or \
+         deleted after it was loaded. Refresh the table and try again."
+    );
+
+    // Constraint violations, each with Db2's message.
+    let foreign = update_error(&mut p, "EMPLOYEES", employee.clone(), "DEPT_ID", json!(999));
+    assert!(foreign.starts_with("SQL0530N"), "{foreign}");
+    assert!(foreign.contains("FK_EMP_DEPT"), "{foreign}");
+
+    let unique = update_error(
+        &mut p,
+        "EMPLOYEES",
+        employee.clone(),
+        "EMAIL",
+        json!("jane.smith@example.com"),
+    );
+    assert!(unique.starts_with("SQL0803N"), "{unique}");
+
+    assert_eq!(
+        update_error(&mut p, "EMPLOYEES", employee.clone(), "LAST_NAME", Value::Null),
+        "SQL0407N Assignment of a NULL value to a NOT NULL column \"LAST_NAME\" is not allowed. SQLSTATE=23502"
+    );
+
+    let long = update_error(
+        &mut p,
+        "EMPLOYEES",
+        employee.clone(),
+        "FIRST_NAME",
+        json!("x".repeat(60)),
+    );
+    assert!(long.contains("SQLSTATE=22001"), "{long}");
+
+    // Values that are refused before reaching Db2.
+    assert_eq!(
+        update_error(
+            &mut p,
+            "EMPLOYEES",
+            employee.clone(),
+            "SALARY",
+            json!("lots")
+        ),
+        "'lots' is not a valid number for column \"SALARY\""
+    );
+    assert_eq!(
+        update_error(
+            &mut p,
+            "EMPLOYEES",
+            json!({ "EMP_ID": "1 OR 1=1" }),
+            "SALARY",
+            json!(1)
+        ),
+        "'1 OR 1=1' is not a valid number for column \"EMP_ID\""
+    );
+
+    let generated = update_error(&mut p, "EMPLOYEES", employee.clone(), "EMP_ID", json!(50));
+    assert!(generated.starts_with("SQL0798N"), "{generated}");
+    let column = update_error(&mut p, "EMPLOYEES", employee.clone(), "NOPE", json!(1));
+    assert!(column.starts_with("SQL0206N \"NOPE\""), "{column}");
+    let table = update_error(&mut p, "NOPE_TABLE", json!({ "ID": 1 }), "X", json!(1));
+    assert!(
+        table.starts_with("SQL0204N \"TEST_SCHEMA.NOPE_TABLE\""),
+        "{table}"
+    );
+
+    // Missing arguments are invalid requests.
+    let resp = p.call(
+        "update_record",
+        p.schema_params(json!({ "table": "EMPLOYEES", "pk_map": employee, "new_val": 1 })),
+    );
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    assert_eq!(
+        snapshot(&mut p),
+        before,
+        "no failed update changed anything"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Delete record
+// ---------------------------------------------------------------------------
+
+/// `delete_record` in TEST_SCHEMA; returns the raw response.
+fn delete(p: &mut Plugin, table: &str, pk_map: Value) -> Value {
+    p.call(
+        "delete_record",
+        p.schema_params(json!({ "table": table, "pk_map": pk_map })),
+    )
+}
+
+fn delete_error(p: &mut Plugin, table: &str, pk_map: Value) -> String {
+    let resp = delete(p, table, pk_map);
+    resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error: {resp}"))
+        .to_string()
+}
+
+fn count(p: &mut Plugin, table: &str, condition: &str) -> i64 {
+    p.query_ok(
+        &format!("SELECT COUNT(*) FROM TEST_SCHEMA.{table} WHERE {condition}"),
+        Value::Null,
+        1,
+    )["rows"][0][0]
+        .as_i64()
+        .unwrap()
+}
+
+#[test]
+fn test_delete_record_by_primary_key() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 920 AND 929",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.CRUD_TEST (ID, NAME) VALUES (920, 'a'), (921, 'b'), (922, 'c'), (923, 'd')",
+        Value::Null,
+        1,
+    );
+
+    // A single-column key, as a number and as the text the grid may send.
+    let resp = delete(&mut p, "CRUD_TEST", json!({ "ID": 920 }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    let resp = delete(&mut p, "CRUD_TEST", json!({ "ID": "921" }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+
+    // The single key pair Tabularis sent before `pk_map` existed.
+    let resp = p.call(
+        "delete_record",
+        p.schema_params(json!({ "table": "CRUD_TEST", "pk_col": "ID", "pk_val": 922 })),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+
+    // Only the rows asked for are gone.
+    let left = p.query_ok(
+        "SELECT ID FROM TEST_SCHEMA.CRUD_TEST WHERE ID BETWEEN 920 AND 929",
+        Value::Null,
+        1,
+    );
+    assert_eq!(left["rows"], json!([[923]]));
+    delete(&mut p, "CRUD_TEST", json!({ "ID": 923 }));
+
+    // Composite primary key: both columns identify the row.
+    let before = count(&mut p, "EMP_PROJECTS", "1 = 1");
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.EMP_PROJECTS (EMP_ID, PROJECT_ID, ROLE) VALUES (5, 3, 'TMP')",
+        Value::Null,
+        1,
+    );
+    let resp = delete(
+        &mut p,
+        "EMP_PROJECTS",
+        json!({ "EMP_ID": 5, "PROJECT_ID": 3 }),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(count(&mut p, "EMP_PROJECTS", "1 = 1"), before);
+    assert_eq!(
+        count(&mut p, "EMP_PROJECTS", "PROJECT_ID = 3"),
+        1,
+        "the other row of project 3 stays"
+    );
+
+    // Delimited names in the schema, the table and the key.
+    p.query_ok(
+        "INSERT INTO \"Mixed Case\".\"Order Details\" (\"Order Id\", \"Unit Price\") VALUES (9, 1)",
+        Value::Null,
+        1,
+    );
+    let resp = p.call(
+        "delete_record",
+        p.params_in(
+            "Mixed Case",
+            json!({ "table": "Order Details", "pk_map": { "Order Id": 9 } }),
+        ),
+    );
+    assert_eq!(resp["result"], json!(1), "{resp}");
+}
+
+#[test]
+fn test_delete_record_table_without_primary_key() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let rows = |p: &mut Plugin| {
+        p.query_ok(
+            "SELECT CODE, QTY FROM TEST_SCHEMA.KEYLESS_TEST ORDER BY CODE, QTY",
+            Value::Null,
+            1,
+        )["rows"]
+            .clone()
+    };
+    assert_eq!(
+        rows(&mut p),
+        json!([["A", 1], ["A", 1], ["B", null], ["C", 3]])
+    );
+
+    // Two identical rows: deleting "the row" removes one of them.
+    let twin = json!({ "CODE": "A", "QTY": 1, "NOTE": "first", "CREATED": "2024-01-01" });
+    let resp = delete(&mut p, "KEYLESS_TEST", twin.clone());
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(rows(&mut p), json!([["A", 1], ["B", null], ["C", 3]]));
+
+    // A row identified partly by NULLs.
+    let nulls = json!({ "CODE": "B", "QTY": null, "NOTE": null, "CREATED": null });
+    let resp = delete(&mut p, "KEYLESS_TEST", nulls);
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(rows(&mut p), json!([["A", 1], ["C", 3]]));
+
+    // Without key values nothing is deleted.
+    let message = delete_error(&mut p, "KEYLESS_TEST", json!({}));
+    assert!(
+        message.starts_with("Cannot identify the row in \"TEST_SCHEMA\".\"KEYLESS_TEST\""),
+        "{message}"
+    );
+    assert_eq!(rows(&mut p), json!([["A", 1], ["C", 3]]));
+
+    // Restore the fixture rows.
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('A', 1, 'first', '2024-01-01'), ('B', NULL, NULL, NULL)",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        rows(&mut p),
+        json!([["A", 1], ["A", 1], ["B", null], ["C", 3]])
+    );
+}
+
+#[test]
+fn test_delete_record_foreign_keys() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // ON DELETE RESTRICT: a parent that still has children cannot go, and
+    // Db2 names the constraint.
+    let message = delete_error(&mut p, "FK_PARENT", json!({ "ID": 1 }));
+    assert!(message.starts_with("SQL0532N"), "{message}");
+    assert!(
+        message.contains("TEST_SCHEMA.FK_CHILD.FK_CHILD_PARENT"),
+        "{message}"
+    );
+    assert!(message.ends_with("SQLSTATE=23001"), "{message}");
+    assert_eq!(count(&mut p, "FK_PARENT", "ID = 1"), 1, "parent kept");
+    assert_eq!(
+        count(&mut p, "FK_CHILD", "PARENT_ID = 1"),
+        2,
+        "children kept"
+    );
+
+    // A parent without children can.
+    let resp = delete(&mut p, "FK_PARENT", json!({ "ID": 2 }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_PARENT (ID, NAME) VALUES (2, 'no children')",
+        Value::Null,
+        1,
+    );
+
+    // Once its children are deleted, so can the first one.
+    for child in [10, 11] {
+        let resp = delete(&mut p, "FK_CHILD", json!({ "ID": child }));
+        assert_eq!(resp["result"], json!(1), "{resp}");
+    }
+    let resp = delete(&mut p, "FK_PARENT", json!({ "ID": 1 }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_PARENT (ID, NAME) VALUES (1, 'has children')",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_CHILD (ID, PARENT_ID) VALUES (10, 1), (11, 1)",
+        Value::Null,
+        1,
+    );
+
+    // ON DELETE CASCADE and SET NULL: the delete succeeds and Db2 applies
+    // the rule to the dependent rows.
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.DEPARTMENTS (DEPT_NAME) VALUES ('Temp dept')",
+        Value::Null,
+        1,
+    );
+    let dept = p.query_ok(
+        "SELECT DEPT_ID FROM TEST_SCHEMA.DEPARTMENTS WHERE DEPT_NAME = 'Temp dept'",
+        Value::Null,
+        1,
+    )["rows"][0][0]
+        .as_i64()
+        .unwrap();
+    p.query_ok(
+        &format!("INSERT INTO TEST_SCHEMA.PROJECTS (PROJECT_NAME, DEPT_ID) VALUES ('Temp project', {dept})"),
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        &format!("INSERT INTO TEST_SCHEMA.EMPLOYEES (FIRST_NAME, LAST_NAME, EMAIL, HIRE_DATE, DEPT_ID) VALUES ('Temp', 'Person', 'temp.person@example.com', '2024-01-01', {dept})"),
+        Value::Null,
+        1,
+    );
+
+    let resp = delete(&mut p, "DEPARTMENTS", json!({ "DEPT_ID": dept }));
+    assert_eq!(resp["result"], json!(1), "{resp}");
+    assert_eq!(
+        count(&mut p, "PROJECTS", "PROJECT_NAME = 'Temp project'"),
+        0,
+        "cascade"
+    );
+    assert_eq!(
+        count(
+            &mut p,
+            "EMPLOYEES",
+            "EMAIL = 'temp.person@example.com' AND DEPT_ID IS NULL"
+        ),
+        1,
+        "set null"
+    );
+    p.query_ok(
+        "DELETE FROM TEST_SCHEMA.EMPLOYEES WHERE EMAIL = 'temp.person@example.com'",
+        Value::Null,
+        1,
+    );
+    assert_eq!(count(&mut p, "EMPLOYEES", "1 = 1"), 6);
+    assert_eq!(count(&mut p, "DEPARTMENTS", "1 = 1"), 4);
+}
+
+#[test]
+fn test_delete_record_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    let before = count(&mut p, "EMPLOYEES", "1 = 1");
+
+    // A key that matches no row: the row is already gone.
+    assert_eq!(
+        delete_error(&mut p, "EMPLOYEES", json!({ "EMP_ID": 424242 })),
+        "No row in \"TEST_SCHEMA\".\"EMPLOYEES\" matches the key values: it was changed or \
+         deleted after it was loaded. Refresh the table and try again."
+    );
+
+    // No key values, in every shape that can arrive.
+    for keys in [json!({}), Value::Null, json!({ "": 1 })] {
+        let message = delete_error(&mut p, "EMPLOYEES", keys);
+        assert!(message.starts_with("Cannot identify the row"), "{message}");
+    }
+    let resp = p.call(
+        "delete_record",
+        p.schema_params(json!({ "table": "EMPLOYEES", "pk_col": "", "pk_val": null })),
+    );
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Cannot identify the row"));
+
+    // A key value that is not what its column holds never reaches Db2 as SQL.
+    assert_eq!(
+        delete_error(&mut p, "EMPLOYEES", json!({ "EMP_ID": "1 OR 1=1" })),
+        "'1 OR 1=1' is not a valid number for column \"EMP_ID\""
+    );
+    // In a text key it is just text that matches nothing.
+    let message = delete_error(&mut p, "EMPLOYEES", json!({ "EMAIL": "' OR '1'='1" }));
+    assert!(message.starts_with("No row in"), "{message}");
+
+    // Unknown key column, unknown table, missing table argument.
+    let column = delete_error(&mut p, "EMPLOYEES", json!({ "NOPE": 1 }));
+    assert!(column.starts_with("SQL0206N \"NOPE\""), "{column}");
+    let table = delete_error(&mut p, "NOPE_TABLE", json!({ "ID": 1 }));
+    assert!(
+        table.starts_with("SQL0204N \"TEST_SCHEMA.NOPE_TABLE\""),
+        "{table}"
+    );
+    let resp = p.call(
+        "delete_record",
+        p.schema_params(json!({ "pk_map": { "ID": 1 } })),
+    );
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    assert_eq!(
+        count(&mut p, "EMPLOYEES", "1 = 1"),
+        before,
+        "nothing was deleted"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Tests — Drop operations (uses DROP_TEST table)
 // ---------------------------------------------------------------------------
 
@@ -1673,138 +4488,267 @@ fn test_crud_insert_update_delete() {
 fn test_drop_index() {
     require_db2!();
     let mut p = Plugin::spawn();
+    p.query("DROP INDEX TEST_SCHEMA.IDX_T_DROP", Value::Null, 1);
+    p.query_ok(
+        "CREATE INDEX TEST_SCHEMA.IDX_T_DROP ON TEST_SCHEMA.DROP_TEST (NAME, PARENT_ID)",
+        Value::Null,
+        1,
+    );
+    let has_index = |p: &mut Plugin| {
+        index_entries(p, "DROP_TEST")
+            .iter()
+            .any(|entry| entry[0] == json!("IDX_T_DROP"))
+    };
+    assert!(has_index(&mut p));
+    let drop = |p: &mut Plugin, table: &str, index: &str| {
+        p.call(
+            "drop_index",
+            p.schema_params(json!({ "table": table, "index_name": index })),
+        )
+    };
 
-    // Drop the test index
+    // An index of another table is not dropped by mistake.
+    let resp = drop(&mut p, "EMPLOYEES", "IDX_T_DROP");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Index \"IDX_T_DROP\" was not found on table \"TEST_SCHEMA\".\"EMPLOYEES\"")
+    );
+    assert!(has_index(&mut p));
+
+    // Dropped, and gone from the list.
+    let resp = drop(&mut p, "DROP_TEST", "IDX_T_DROP");
+    assert_eq!(resp["result"], Value::Null, "{resp}");
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert!(!has_index(&mut p));
+
+    // An index that does not exist (any more).
+    let resp = drop(&mut p, "DROP_TEST", "IDX_T_DROP");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Index \"IDX_T_DROP\" was not found on table \"TEST_SCHEMA\".\"DROP_TEST\"")
+    );
+    let resp = drop(&mut p, "NOPE_TABLE", "IDX_T_DROP");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not found"),
+        "{resp}"
+    );
     let resp = p.call(
         "drop_index",
-        p.schema_params(json!({
-            "table": "DROP_TEST",
-            "index_name": "IDX_DROP_TEST_NAME"
-        })),
-    );
-    assert!(resp.get("result").is_some(), "drop_index failed: {resp}");
-
-    // Verify index is gone
-    let result = p.call_ok(
-        "get_indexes",
         p.schema_params(json!({ "table": "DROP_TEST" })),
     );
-    let indexes = result.as_array().unwrap();
-    let has_idx = indexes.iter().any(|i| {
-        i["name"]
-            .as_str()
-            .map(|n| n.contains("IDX_DROP_TEST_NAME"))
-            .unwrap_or(false)
-    });
-    assert!(!has_idx, "index should have been dropped");
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    // The index behind a primary key cannot be dropped on its own.
+    let primary = index_entries(&mut p, "DROP_TEST")
+        .into_iter()
+        .find(|entry| entry[3] == json!(true))
+        .expect("primary key index");
+    let resp = drop(&mut p, "DROP_TEST", primary[0].as_str().unwrap());
+    assert_eq!(
+        resp["error"]["message"],
+        json!("SQL0669N A system required index cannot be dropped explicitly. SQLSTATE=42917")
+    );
+    assert!(index_entries(&mut p, "DROP_TEST")
+        .iter()
+        .any(|entry| entry[3] == json!(true)));
 }
 
 #[test]
 fn test_drop_foreign_key() {
     require_db2!();
     let mut p = Plugin::spawn();
-
-    // Drop the test FK
-    let resp = p.call(
-        "drop_foreign_key",
-        p.schema_params(json!({
-            "table": "DROP_TEST",
-            "fk_name": "FK_DROP_TEST"
-        })),
+    // A table of its own, with two foreign keys on different columns (Db2
+    // ignores a second constraint on the same columns as a duplicate).
+    p.query("DROP TABLE TEST_SCHEMA.FK_TMP_CHILD", Value::Null, 1);
+    p.query_ok(
+        "CREATE TABLE TEST_SCHEMA.FK_TMP_CHILD (A INTEGER, B INTEGER, \
+         CONSTRAINT FK_T_DROP FOREIGN KEY (A) REFERENCES TEST_SCHEMA.FK_PARENT (ID) ON DELETE CASCADE, \
+         CONSTRAINT \"FK \"\"odd\"\" name\" FOREIGN KEY (B) REFERENCES TEST_SCHEMA.DROP_TEST_PARENT (ID))",
+        Value::Null,
+        1,
     );
+    let names = |p: &mut Plugin| -> Vec<String> {
+        foreign_keys_of(p, "FK_TMP_CHILD")
+            .iter()
+            .map(|key| key[0].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&mut p), ["FK \"odd\" name", "FK_T_DROP"]);
+    let drop = |p: &mut Plugin, table: &str, args: Value| {
+        let mut params = json!({ "table": table });
+        for (key, value) in args.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        p.call("drop_foreign_key", p.schema_params(params))
+    };
+
+    // While the constraint exists it is enforced.
+    let orphan = p.query(
+        "INSERT INTO TEST_SCHEMA.FK_TMP_CHILD (A) VALUES (999)",
+        Value::Null,
+        1,
+    );
+    assert!(orphan["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("SQL0530N"));
+
+    // A foreign key of another table is not this table's to drop.
+    let resp = drop(&mut p, "EMPLOYEES", json!({ "fk_name": "FK_T_DROP" }));
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Foreign key \"FK_T_DROP\" was not found on table \"TEST_SCHEMA\".\"EMPLOYEES\"")
+    );
+    assert_eq!(names(&mut p).len(), 2);
+
+    // Dropped, by the argument name Tabularis sends and by the documented
+    // one, with a name that needs quoting.
+    let resp = drop(&mut p, "FK_TMP_CHILD", json!({ "fk_name": "FK_T_DROP" }));
+    assert_eq!(resp["result"], Value::Null, "{resp}");
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(names(&mut p), ["FK \"odd\" name"]);
+    let resp = drop(
+        &mut p,
+        "FK_TMP_CHILD",
+        json!({ "constraint_name": "FK \"odd\" name" }),
+    );
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(names(&mut p), Vec::<String>::new());
+
+    // The constraint no longer restricts anything.
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_TMP_CHILD (A) VALUES (999)",
+        Value::Null,
+        1,
+    );
+
+    // A foreign key that does not exist (any more), a missing table and a
+    // missing argument.
+    let resp = drop(&mut p, "FK_TMP_CHILD", json!({ "fk_name": "FK_T_DROP" }));
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Foreign key \"FK_T_DROP\" was not found on table \"TEST_SCHEMA\".\"FK_TMP_CHILD\"")
+    );
+    let resp = drop(&mut p, "NOPE_TABLE", json!({ "fk_name": "FK_T_DROP" }));
     assert!(
-        resp.get("result").is_some(),
-        "drop_foreign_key failed: {resp}"
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not found"),
+        "{resp}"
+    );
+    let resp = drop(&mut p, "FK_TMP_CHILD", json!({}));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    // A primary key is a constraint but not a foreign key.
+    let primary = index_entries(&mut p, "FK_PARENT")[0][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = drop(&mut p, "FK_PARENT", json!({ "fk_name": primary }));
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Foreign key"),
+        "{resp}"
     );
 
-    // Verify FK is gone
-    let result = p.call_ok(
-        "get_foreign_keys",
-        p.schema_params(json!({ "table": "DROP_TEST" })),
-    );
-    let fks = result.as_array().unwrap();
-    let has_fk = fks.iter().any(|f| {
-        f["name"]
-            .as_str()
-            .map(|n| n.contains("FK_DROP_TEST"))
-            .unwrap_or(false)
-    });
-    assert!(!has_fk, "FK should have been dropped");
+    p.query_ok("DROP TABLE TEST_SCHEMA.FK_TMP_CHILD", Value::Null, 1);
 }
 
 // ---------------------------------------------------------------------------
 // Tests — Explain query
 // ---------------------------------------------------------------------------
 
+fn explain(p: &mut Plugin, query: &str, analyze: bool) -> Value {
+    p.call(
+        "explain_query",
+        p.schema_params(json!({ "query": query, "analyze": analyze })),
+    )
+}
+
+/// The Db2 payload of a successful `explain_query`, after checking the raw
+/// envelope Tabularis hands to the plugin's parser.
+fn explain_payload(p: &mut Plugin, query: &str, analyze: bool) -> Value {
+    let resp = explain(p, query, analyze);
+    let result = &resp["result"];
+    assert_eq!(result["engine"], "db2", "{resp}");
+    assert_eq!(result["format"], "db2-explain-tables-json", "{resp}");
+    assert_eq!(result["original_query"], query);
+    let payload = result["payload"].as_str().expect("payload");
+    assert!(payload.starts_with("{\"db2_explain\":1,"), "{payload}");
+    serde_json::from_str(payload).expect("payload is JSON")
+}
+
+fn operator_types(payload: &Value) -> Vec<String> {
+    payload["operators"]
+        .as_array()
+        .expect("operators")
+        .iter()
+        .map(|operator| operator["type"].as_str().expect("type").to_string())
+        .collect()
+}
+
+/// `(schema, name)` of every table or index streamed into an operator.
+fn objects_read(payload: &Value) -> Vec<(String, String)> {
+    payload["streams"]
+        .as_array()
+        .expect("streams")
+        .iter()
+        .filter(|stream| stream["source_type"] == "D")
+        .map(|stream| {
+            (
+                stream["object_schema"]
+                    .as_str()
+                    .expect("schema")
+                    .to_string(),
+                stream["object_name"].as_str().expect("name").to_string(),
+            )
+        })
+        .collect()
+}
+
+fn explain_rows_left(p: &mut Plugin) -> i64 {
+    let result = p.query_ok(
+        "SELECT COUNT(*) FROM SYSTOOLS.EXPLAIN_STATEMENT WHERE QUERYTAG LIKE 'TABULARIS%'",
+        Value::Null,
+        1,
+    );
+    result["rows"][0][0].as_i64().expect("count")
+}
+
 #[test]
 fn test_explain_query() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "explain_query",
-        p.schema_params(json!({
-            "query": "SELECT * FROM TEST_SCHEMA.EMPLOYEES WHERE DEPT_ID = 1",
-            "analyze": false
-        })),
-    );
+    let payload = explain_payload(&mut p, "SELECT * FROM EMPLOYEES WHERE DEPT_ID = 1;", false);
 
-    assert_eq!(result["driver"], json!("db2"));
-    assert_eq!(result["has_analyze_data"], json!(false));
-    assert!(
-        result["original_query"]
-            .as_str()
-            .unwrap()
-            .contains("EMPLOYEES"),
-        "should preserve original query"
+    assert_eq!(payload["schema"], "TEST_SCHEMA");
+    assert!(payload["analyze"].is_null());
+    assert_eq!(operator_types(&payload), ["RETURN", "TBSCAN"]);
+    let root = &payload["operators"][0];
+    assert_eq!(root["id"], 1);
+    assert!(root["total_cost"].as_f64().expect("cost") > 0.0);
+    assert_eq!(
+        objects_read(&payload),
+        [("TEST_SCHEMA".to_string(), "EMPLOYEES".to_string())]
     );
-
-    // The root node should have a real operator type from the explain tables,
-    // not the old placeholder "DB2 Explain".
-    let root = &result["root"];
-    assert!(
-        !root["id"].as_str().unwrap_or("").is_empty(),
-        "root node should have an id"
+    assert_eq!(
+        payload["predicates"],
+        json!([{ "operator_id": 2, "how_applied": "SARG", "text": "(Q1.DEPT_ID = 1)" }])
     );
     assert!(
-        !root["node_type"].as_str().unwrap_or("").is_empty(),
-        "root node should have an operator type"
-    );
-    assert_ne!(
-        root["node_type"].as_str().unwrap_or(""),
-        "DB2 Explain",
-        "root node should have a real operator type, not the placeholder"
-    );
-
-    // raw_output should contain the readable plan text, not the old placeholder.
-    let raw = result["raw_output"].as_str().unwrap_or("");
-    assert!(
-        !raw.contains("not implemented yet"),
-        "raw_output should contain real plan data"
-    );
-}
-
-#[test]
-fn test_explain_query_analyze() {
-    require_db2!();
-    let mut p = Plugin::spawn();
-
-    let result = p.call_ok(
-        "explain_query",
-        p.schema_params(json!({
-            "query": "SELECT * FROM TEST_SCHEMA.EMPLOYEES WHERE DEPT_ID = 1",
-            "analyze": true
-        })),
-    );
-
-    assert_eq!(result["driver"], json!("db2"));
-    assert_eq!(result["has_analyze_data"], json!(true));
-    assert!(
-        result["original_query"]
-            .as_str()
-            .unwrap()
-            .contains("EMPLOYEES"),
-        "should preserve original query"
+        payload["arguments"]
+            .as_array()
+            .expect("arguments")
+            .iter()
+            .any(|argument| argument["type"] == "PREPTIME"),
+        "Db2 reports the time it took to compile the statement: {payload}"
     );
 }
 
@@ -1813,28 +4757,162 @@ fn test_explain_query_join() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "explain_query",
-        p.schema_params(json!({
-            "query": "SELECT e.FIRST_NAME, d.DEPT_NAME FROM TEST_SCHEMA.EMPLOYEES e JOIN TEST_SCHEMA.DEPARTMENTS d ON e.DEPT_ID = d.DEPT_ID",
-            "analyze": false
-        })),
+    let payload = explain_payload(
+        &mut p,
+        "SELECT E.LAST_NAME, D.DEPT_NAME FROM EMPLOYEES E \
+         LEFT JOIN DEPARTMENTS D ON D.DEPT_ID = E.DEPT_ID \
+         WHERE E.EMP_ID BETWEEN 2 AND 5 AND E.SALARY > 1000 ORDER BY E.LAST_NAME",
+        false,
     );
 
-    assert_eq!(result["driver"], json!("db2"));
+    let types = operator_types(&payload);
+    assert!(types.iter().any(|t| t.ends_with("JOIN")), "{types:?}");
+    assert!(types.contains(&"IXSCAN".to_string()), "{types:?}");
 
-    // A JOIN query should produce a plan tree with children.
-    let root = &result["root"];
-    let raw = result["raw_output"].as_str().unwrap_or("");
-    // The plan should mention multiple operators for a join.
+    // The index the plan reads comes with its table.
+    let indexes = payload["indexes"].as_array().expect("indexes");
+    assert_eq!(indexes.len(), 1, "{payload}");
+    assert_eq!(indexes[0]["table_schema"], "TEST_SCHEMA");
+    assert_eq!(indexes[0]["table_name"], "EMPLOYEES");
+    let objects = objects_read(&payload);
     assert!(
-        root["children"]
-            .as_array()
-            .map(|a| !a.is_empty())
-            .unwrap_or(false)
-            || raw.lines().count() > 1,
-        "a JOIN query should produce a multi-node plan"
+        objects.contains(&(
+            indexes[0]["schema"].as_str().unwrap().to_string(),
+            indexes[0]["name"].as_str().unwrap().to_string()
+        )),
+        "{objects:?}"
     );
+    assert!(objects.contains(&("TEST_SCHEMA".to_string(), "DEPARTMENTS".to_string())));
+
+    let applied: Vec<&str> = payload["predicates"]
+        .as_array()
+        .expect("predicates")
+        .iter()
+        .map(|predicate| predicate["how_applied"].as_str().unwrap())
+        .collect();
+    for how in ["JOIN", "START", "STOP", "SARG"] {
+        assert!(applied.contains(&how), "{how} missing: {applied:?}");
+    }
+    let outer_join = payload["arguments"]
+        .as_array()
+        .expect("arguments")
+        .iter()
+        .find(|argument| argument["type"] == "OUTERJN")
+        .expect("an outer join argument");
+    assert!(["LEFT", "RIGHT"].contains(&outer_join["value"].as_str().unwrap()));
+}
+
+#[test]
+fn test_explain_query_other_schema_and_delimited_names() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let payload = explain_payload(
+        &mut p,
+        "SELECT COUNT(*) FROM \"Mixed Case\".\"Order Details\"",
+        false,
+    );
+    let indexes = payload["indexes"].as_array().expect("indexes");
+    assert_eq!(indexes[0]["table_schema"], "Mixed Case", "{payload}");
+    assert_eq!(indexes[0]["table_name"], "Order Details", "{payload}");
+}
+
+#[test]
+fn test_explain_query_data_change_is_not_run() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let payload = explain_payload(&mut p, "DELETE FROM PAGING_TEST WHERE N <= 10", false);
+    assert_eq!(operator_types(&payload)[..2], ["RETURN", "DELETE"]);
+
+    let count = p.query_ok(
+        "SELECT COUNT(*) FROM PAGING_TEST WHERE N <= 10",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        count["rows"][0][0], 10,
+        "EXPLAIN only compiles the statement"
+    );
+}
+
+#[test]
+fn test_explain_query_analyze() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let payload = explain_payload(&mut p, "SELECT * FROM PAGING_TEST WHERE N > 100", true);
+    // The statement ran: the payload carries what really came back.
+    assert_eq!(payload["analyze"]["rows"], 1100, "{payload}");
+    assert!(payload["analyze"]["elapsed_ms"].as_f64().expect("time") > 0.0);
+}
+
+#[test]
+fn test_explain_query_analyze_reports_runtime_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The plan is fine; running the statement is not.
+    let resp = explain(&mut p, "SELECT 1 / (EMP_ID - EMP_ID) FROM EMPLOYEES", true);
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .expect("an error")
+            .starts_with("SQL0801N"),
+        "{resp}"
+    );
+}
+
+#[test]
+fn test_explain_query_errors_name_the_statement() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Db2's message is about the statement as written, not about the
+    // EXPLAIN wrapped around it.
+    let resp = explain(&mut p, "SELEC 1", false);
+    let message = resp["error"]["message"].as_str().expect("an error");
+    assert!(message.starts_with("SQL0104N"), "{message}");
+    assert!(message.contains("BEGIN-OF-STATEMENT"), "{message}");
+    assert!(!message.contains("QUERYTAG"), "{message}");
+    assert!(!message.contains("TABULARIS"), "{message}");
+
+    let resp = explain(&mut p, "SELECT * FROM NO_SUCH_TABLE", false);
+    assert_eq!(
+        resp["error"]["message"],
+        "SQL0204N \"TEST_SCHEMA.NO_SUCH_TABLE\" is an undefined name. SQLSTATE=42704"
+    );
+
+    let resp = explain(&mut p, "CREATE TABLE NOT_EXPLAINED (A INTEGER)", false);
+    assert_eq!(
+        resp["error"]["message"],
+        "Db2 has no access plan for this statement: only queries and data \
+         changes (SELECT, VALUES, INSERT, UPDATE, DELETE, MERGE) can be explained"
+    );
+    let tables = p.call_ok("get_tables", p.schema_params(json!({})));
+    assert!(
+        !tables.to_string().contains("NOT_EXPLAINED"),
+        "the statement was only compiled"
+    );
+
+    let resp = explain(&mut p, " ; ", false);
+    assert_eq!(resp["error"]["message"], "The query is empty");
+}
+
+#[test]
+fn test_explain_query_leaves_no_rows_behind() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let before = explain_rows_left(&mut p);
+    for query in [
+        "SELECT * FROM EMPLOYEES",
+        "SELECT DEPT_ID, COUNT(*) FROM EMPLOYEES GROUP BY DEPT_ID",
+        "SELEC 1",
+    ] {
+        explain(&mut p, query, false);
+    }
+    assert_eq!(explain_rows_left(&mut p), before);
 }
 
 // ---------------------------------------------------------------------------

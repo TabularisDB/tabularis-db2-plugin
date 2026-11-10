@@ -64,14 +64,14 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Read table data | Verified | — |
 | Schema & object browsing | Verified | [#1](https://github.com/TabularisDB/tabularis-db2-plugin/issues/1) |
 | Query execution | Verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
-| Insert record | Not yet verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
-| Update record | Not yet verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
-| Delete record | Not yet verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
-| DDL generation | Not yet verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
-| View support | Not yet verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
-| Index management | Not yet verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
-| Foreign key management | Not yet verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
-| Routine support | Not yet verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
+| Insert record | Verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
+| Update record | Verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
+| Delete record | Verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
+| DDL generation | Verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
+| View support | Verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
+| Index management | Verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
+| Foreign key management | Verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
+| Routine support | Verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
 | Explain query | Verified | [#11](https://github.com/TabularisDB/tabularis-db2-plugin/issues/11) |
 
 ## Features
@@ -79,8 +79,8 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 - **Connection via ODBC** — Connect to Db2 using host, port, database, credentials, and optional plugin settings.
 - **Schema & Object Browsing** — List schemas, tables, columns, views, indexes, foreign keys, and routines.
 - **Query Execution** — Run any SQL statement, with pagination that leaves your `ORDER BY`, `FETCH FIRST` and isolation clauses alone, typed values (integers, floats, booleans, exact decimals, BLOB previews) and Db2's own error messages. Multi-statement scripts run on one connection, and `BEGIN ... END` blocks stay one statement.
-- **Inline Editing** — Insert, update, and delete rows directly from the Tabularis grid.
-- **DDL Generation** — Generate `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, and `ADD FOREIGN KEY` SQL.
+- **Inline Editing** — Insert, update, and delete rows directly from the Tabularis grid, including tables without a primary key: the row is matched on all its columns and exactly one row is changed.
+- **DDL Generation** — Generate `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, and `ADD FOREIGN KEY` SQL that Db2 runs as is: quoted identifiers, identity columns, column comments, and the `REORG` a column change needs. Existing tables can be exported and dumped with their real definition.
 - **Modern Plugin Manifest** — Uses current Tabularis plugin manifest fields including `settings`, modern capabilities, color/icon metadata, and connection string support.
 - **Modular Rust Codebase** — RPC, client creation, metadata handlers, CRUD, DDL, and utilities are split into dedicated modules with unit tests.
 
@@ -92,7 +92,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | **String** | CHAR, VARCHAR, CLOB, GRAPHIC, VARGRAPHIC, DBCLOB |
 | **Date/Time** | DATE, TIME, TIMESTAMP |
 | **Binary** | BLOB, BINARY, VARBINARY |
-| **Other** | XML, JSON |
+| **Other** | BOOLEAN, XML |
 
 ## Requirements
 
@@ -126,8 +126,9 @@ search for **Db2**, and install.
 1. Download the latest release for your platform from the
    [Releases page](https://github.com/TabularisDB/tabularis-db2-plugin/releases).
 2. Extract the archive.
-3. Copy `tabularis-db2-plugin` (or `tabularis-db2-plugin.exe` on Windows) and
-   `.tabularium` into the Tabularis plugins directory:
+3. Copy everything the archive contains (`tabularis-db2-plugin` or
+   `tabularis-db2-plugin.exe`, `.tabularium` and the `explain/` folder with
+   the Visual EXPLAIN parser) into the Tabularis plugins directory:
 
    | OS | Plugins Directory |
    | --- | --- |
@@ -150,10 +151,16 @@ The code is intentionally split by responsibility:
 - `src/main.rs` — request loop and dispatch
 - `src/client.rs` — ODBC connection string construction, one connection per request, text fetching
 - `src/handlers/metadata.rs` — schemas, tables, columns, views, indexes, FKs, routines
-- `src/handlers/query.rs` — connection test, query execution, explain plan
+- `src/handlers/query.rs` — connection test, query execution
+- `src/handlers/explain.rs` — `EXPLAIN PLAN`, read back from the explain tables
 - `src/handlers/crud.rs` — insert, update, delete
 - `src/handlers/ddl.rs` — SQL generation helpers
 - `src/utils/` — pure helpers with unit tests
+- `explain/` — the Visual EXPLAIN parser (TypeScript): turns the explain-table
+  rows `explain_query` returns into the plan tree Tabularis draws. It is built
+  into `explain/dist/index.iife.js`, declared under `explain_parsers` in
+  `.tabularium` and shipped in every release archive, the same way as the SQL
+  Server plugin's SHOWPLAN parser.
 
 ## Supported Operations
 
@@ -165,30 +172,33 @@ The code is intentionally split by responsibility:
 | `get_schemas` | Lists the user schemas, empty ones included (Db2's own `SYS*`, `NULLID` and `SQLJ` are left out) |
 | `get_tables` | Lists the tables of the selected schema: base, typed, materialized query and created temporary tables, and nicknames |
 | `get_columns` | Returns column metadata for a table or view: type with length/precision/scale, nullability, key, identity, generated flag, default and comment |
-| `get_foreign_keys` | Lists foreign keys for a table |
-| `get_indexes` | Lists indexes for a table |
+| `get_foreign_keys` | Lists the foreign keys of a table, one entry per column: referenced table and column, `ON DELETE` / `ON UPDATE` rule, and position within a composite key |
+| `get_indexes` | Lists the indexes of a table, one entry per key column: uniqueness, primary key, position, and the expression of an expression-based index |
 | `get_views` | Lists views in the selected schema |
-| `get_view_definition` | Returns the stored view definition |
+| `get_view_definition` | Returns the view's query: the stored `CREATE VIEW` text without its header |
 | `get_view_columns` | Returns column metadata for a view |
-| `get_routines` | Lists routines in the selected schema |
-| `get_routine_parameters` | Returns routine parameters |
-| `get_routine_definition` | Returns the stored routine body when available |
+| `create_view` / `alter_view` / `drop_view` | Create a view from a query, replace its query (`CREATE OR REPLACE VIEW`, keeping an explicit column list) and drop it |
+| `get_routines` | Lists functions and procedures, with the argument types that tell overloads apart |
+| `get_routine_parameters` | Returns a routine's parameters with their direction, its return value or returned columns |
+| `get_routine_definition` | Returns the `CREATE` statement of an SQL routine |
 | `execute_query` | Runs one statement. A result set (`SELECT`, `WITH`, `VALUES`, `CALL`) is paged on the cursor and returned with typed values; anything else returns the number of rows it changed |
 | `execute_query_batch` | Runs the statements of a script in order on one connection, reporting each one's result or error |
-| `explain_query` | Returns the DB2 execution plan tree by reading explain tables |
-| `insert_record` | Inserts a row |
-| `update_record` | Updates a row by primary key column |
-| `delete_record` | Deletes a row by primary key column |
+| `explain_query` | Returns Db2's access plan in Tabularis's raw form (`engine: db2`, `format: db2-explain-tables-json`): the rows of the explain tables, which the plugin's parser draws with tables and indexes, row estimates, costs, predicates and join types. With `analyze`, the statement also runs and its real row count and time are reported |
+| `insert_record` | Inserts a row, rendering each value for its column type (numbers validated, text and binary data bound as parameters, `NULL`, column defaults, BLOB uploads) |
+| `fetch_blob_as_data_url` / `save_blob_to_file` | Read the whole value of a binary column for the preview and for export |
+| `update_record` | Sets one column of one row, found by its primary key (single or composite) or, for a table without one, by the values of all its columns |
+| `delete_record` | Deletes one row, found the same way as for `update_record` |
 | `get_schema_snapshot` | Returns all tables with columns and foreign keys |
 | `get_all_columns_batch` | Returns all column metadata for a schema |
 | `get_all_foreign_keys_batch` | Returns all FK metadata for a schema |
-| `get_create_table_sql` | Generates `CREATE TABLE` SQL |
-| `get_add_column_sql` | Generates `ALTER TABLE ... ADD COLUMN` SQL |
-| `get_alter_column_sql` | Generates `ALTER TABLE ... ALTER/RENAME COLUMN` SQL |
-| `get_create_index_sql` | Generates `CREATE INDEX` SQL |
-| `get_create_foreign_key_sql` | Generates FK DDL |
-| `drop_index` | Executes `DROP INDEX` |
-| `drop_foreign_key` | Executes `ALTER TABLE ... DROP FOREIGN KEY` |
+| `get_create_table_sql` | Generates `CREATE TABLE` (identity columns, defaults, primary key) and `COMMENT ON COLUMN` statements |
+| `get_add_column_sql` | Generates `ALTER TABLE ... ADD COLUMN`; a `NOT NULL` column without a default gets `WITH DEFAULT`, which Db2 requires on a table with rows |
+| `get_alter_column_sql` | Generates one statement per changed attribute (rename, type, nullability, default, identity, comment), followed by `REORG TABLE` when the change requires it |
+| `get_create_index_sql` | Generates `CREATE [UNIQUE] INDEX` in the table's schema |
+| `get_create_foreign_key_sql` | Generates `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY`; referential actions Db2 does not have (`ON UPDATE CASCADE`) are refused |
+| `get_table_ddl` | Rebuilds the `CREATE TABLE` of an existing table from the catalog, with its indexes and comments, for table export and database dumps |
+| `drop_index` | Drops an index of the table, in whichever schema the index lives |
+| `drop_foreign_key` | Drops a foreign key of the table (`ALTER TABLE ... DROP FOREIGN KEY`) |
 
 ## Building from Source
 
@@ -196,6 +206,8 @@ The code is intentionally split by responsibility:
 
 - [Rust](https://www.rust-lang.org/tools/install) (edition 2021)
 - [`just`](https://github.com/casey/just) (optional, wraps the common cargo invocations)
+- [Node.js](https://nodejs.org/) 22.18 or later and [pnpm](https://pnpm.io/)
+  (the version pinned in `explain/package.json`), for the Visual EXPLAIN parser
 - The ODBC driver manager development files (`unixodbc-dev` on Debian/Ubuntu,
   `brew install unixodbc` on macOS; nothing to install on Windows)
 - A Db2 ODBC driver and a running Db2 instance (for integration tests)
@@ -203,8 +215,9 @@ The code is intentionally split by responsibility:
 ### Build
 
 ```bash
-just build      # debug build
+just build      # debug build, plus the Visual EXPLAIN parser bundle
 just release    # release build (what the GitHub Actions workflow ships)
+just build-explain   # the parser bundle alone (explain/dist/index.iife.js)
 ```
 
 Or directly with cargo:
@@ -218,7 +231,7 @@ The binary will be located at `target/release/tabularis-db2-plugin`.
 ### Install Locally
 
 ```bash
-just dev-install   # build + copy binary and manifest into the Tabularis plugins dir
+just dev-install   # build + copy binary, manifest and parser bundle into the Tabularis plugins dir
 just uninstall     # remove the installed plugin
 ```
 
@@ -297,7 +310,13 @@ just test    # cargo test --bins — unit tests for SQL builders, quoting, pagin
 just lint    # clippy -D warnings
 just fmt     # cargo fmt --all
 just validate-manifest   # .tabularium against the live registry schema
+just test-explain        # typecheck and test the Visual EXPLAIN parser
 ```
+
+The parser's tests (`explain/tests/`) run on explain payloads captured from
+Db2 12.1 and compare the plans with committed goldens. Regenerate the goldens
+with `UPDATE_GOLDENS=1 pnpm --dir explain test` after an intended change, and
+review the diff.
 
 ### Smoke Test the Plugin Process
 
@@ -348,16 +367,23 @@ and publishes the release with that changelog section as its notes.
 - **Language:** Rust (edition 2021)
 - **Database driver:** [`odbc-api`](https://crates.io/crates/odbc-api)
 - **Serialization:** serde + serde_json
+- **Visual EXPLAIN parser:** TypeScript, bundled with tsup, tested with vitest
 - **Protocol:** JSON-RPC 2.0 over stdio
 
 ## Known Limitations
 
 - The plugin requires a working Db2 ODBC driver on the host system.
-- `explain_query` reads the DB2 explain tables (`SYSTOOLS.EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`, `EXPLAIN_STATEMENT`) to build a plan tree; these tables must exist (see `CALL SYSPROC.SYSINSTALLOBJECTS`). Some cost/row metrics depend on the DB2 edition and optimizer statistics being up to date.
+- `explain_query` writes the plan into the Db2 explain tables (the session user's own, else `SYSTOOLS`) and deletes it once read. When neither schema has them, they are created in `SYSTOOLS` with `SYSPROC.SYSINSTALLOBJECTS`, which needs the authority to create tables there. Costs and row estimates are the optimizer's, and depend on up-to-date statistics (`RUNSTATS`).
+- Analyze runs the statement (a data change is committed) and reports its real row count and elapsed time for the statement as a whole. Per-operator actuals would need an activity event monitor, which a client cannot assume it may create.
 - Catalog queries were designed using Db2 catalog conventions and DBeaver’s Db2 extension as a reference, but they should still be validated against the specific Db2 edition/version you target.
 - Every statement is committed on its own: connections run in autocommit mode and are not kept between requests, so an explicit transaction cannot span several statements run from the editor. Wrap the statements in a `BEGIN ... END` compound statement to run them atomically.
 - A `BLOB` in a query result carries its first 10,240 bytes and its full size; `BINARY`, `VARBINARY` and `FOR BIT DATA` values are shown as hexadecimal text.
 - Paging skips rows on the cursor, so a very deep page of a very large result takes longer than the first ones. Filter or order the result to get to the rows you need.
+- Changing a column's type or nullability, or dropping a column, leaves a Db2 table in "reorg pending" state. The statements generated by the column editor end with the `REORG TABLE` that clears it; after an `ALTER TABLE` of your own (or the "Delete Column" action), run the `CALL SYSPROC.ADMIN_CMD('REORG TABLE ...')` the error message suggests.
+- Db2 only supports `NO ACTION` and `RESTRICT` for `ON UPDATE`, and has no `SET DEFAULT` referential action; the foreign key editor reports that instead of generating SQL that cannot run.
+- A dump or export keeps identity columns as they are defined. Restoring rows into a `GENERATED ALWAYS` identity column fails (`SQL0798N`), as Db2 does not accept explicit values there; foreign keys are not part of the generated `CREATE TABLE`.
+- Db2 has no `JSON` column type (JSON is stored in `CLOB`, `VARCHAR` or `BLOB` columns), so it is not offered when creating a column.
+- Routines are read-only: they are listed, described and opened, but creating, running or dropping one goes through the SQL editor. External and built-in routines have no stored source, so only SQL routines can be opened.
 - `get_databases` is intentionally conservative and currently returns the active server/database identity instead of enumerating every possible database on an instance.
 
 ## [Changelog](./CHANGELOG.md)

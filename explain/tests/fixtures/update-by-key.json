@@ -1,0 +1,266 @@
+{
+  "db2_explain": 1,
+  "schema": "TEST_SCHEMA",
+  "operators": [
+    {
+      "id": 1,
+      "type": "RETURN",
+      "total_cost": 0.00372934737242758,
+      "io_cost": 0.0,
+      "cpu_cost": 39477.0,
+      "first_row_cost": 0.00372934737242758,
+      "re_total_cost": 0.000379386969143525,
+      "buffers": 1.0
+    },
+    {
+      "id": 2,
+      "type": "UPDATE",
+      "total_cost": 0.00372934737242758,
+      "io_cost": 0.0,
+      "cpu_cost": 39477.0,
+      "first_row_cost": 0.00372934737242758,
+      "re_total_cost": 0.000379386969143525,
+      "buffers": 1.0
+    },
+    {
+      "id": 3,
+      "type": "FETCH",
+      "total_cost": 0.00372934737242758,
+      "io_cost": 0.0,
+      "cpu_cost": 39477.0,
+      "first_row_cost": 0.00372934737242758,
+      "re_total_cost": 0.000379386969143525,
+      "buffers": 1.0
+    },
+    {
+      "id": 4,
+      "type": "IXSCAN",
+      "total_cost": 0.00364338071085513,
+      "io_cost": 0.0,
+      "cpu_cost": 38567.0,
+      "first_row_cost": 0.00364338071085513,
+      "re_total_cost": 0.000293420307571068,
+      "buffers": 1.0
+    }
+  ],
+  "streams": [
+    {
+      "source_type": "O",
+      "source_id": 2,
+      "target_id": 1,
+      "object_schema": null,
+      "object_name": null,
+      "count": 0.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 3,
+      "target_id": 2,
+      "object_schema": null,
+      "object_name": null,
+      "count": 0.0
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 3,
+      "object_schema": "TEST_SCHEMA",
+      "object_name": "CRUD_TEST",
+      "count": 0.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 4,
+      "target_id": 3,
+      "object_schema": null,
+      "object_name": null,
+      "count": 0.0
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 4,
+      "object_schema": "SYSIBM",
+      "object_name": "SQL261110050755440",
+      "count": 0.0
+    }
+  ],
+  "predicates": [
+    {
+      "operator_id": 4,
+      "how_applied": "START",
+      "text": "(Q2.ID = 1)"
+    },
+    {
+      "operator_id": 4,
+      "how_applied": "STOP",
+      "text": "(Q2.ID = 1)"
+    }
+  ],
+  "arguments": [
+    {
+      "operator_id": 1,
+      "type": "BLDLEVEL",
+      "value": "DB2 v12.1.5.0 : special_85816"
+    },
+    {
+      "operator_id": 1,
+      "type": "CPUCACHE",
+      "value": "1048576"
+    },
+    {
+      "operator_id": 1,
+      "type": "HEAPUSE",
+      "value": "96 Pages"
+    },
+    {
+      "operator_id": 1,
+      "type": "MAX CARD",
+      "value": "0"
+    },
+    {
+      "operator_id": 1,
+      "type": "PLANID",
+      "value": "934bcfa0a4bd46bc"
+    },
+    {
+      "operator_id": 1,
+      "type": "PREPTIME",
+      "value": "5 milliseconds"
+    },
+    {
+      "operator_id": 1,
+      "type": "SEMEVID",
+      "value": "494d25221635e5f4"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTHEAP",
+      "value": "8192"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTID",
+      "value": "66eedebddea2edba"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTID",
+      "value": "0"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTNM",
+      "value": "SYSTEM"
+    },
+    {
+      "operator_id": 2,
+      "type": "MAX CARD",
+      "value": "1"
+    },
+    {
+      "operator_id": 3,
+      "type": "MAX CARD",
+      "value": "1"
+    },
+    {
+      "operator_id": 3,
+      "type": "MAXPAGES",
+      "value": "1"
+    },
+    {
+      "operator_id": 3,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 3,
+      "type": "ROWLOCK",
+      "value": "EXCLUSIVE"
+    },
+    {
+      "operator_id": 3,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 3,
+      "type": "SPEED",
+      "value": "SLOW"
+    },
+    {
+      "operator_id": 3,
+      "type": "TABLOCK",
+      "value": "INTENT EXCLUSIVE"
+    },
+    {
+      "operator_id": 3,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    },
+    {
+      "operator_id": 3,
+      "type": "THROTTLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 3,
+      "type": "VISIBLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 3,
+      "type": "WRAPPING",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 4,
+      "type": "MAX CARD",
+      "value": "1"
+    },
+    {
+      "operator_id": 4,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 4,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 4,
+      "type": "ROWLOCK",
+      "value": "EXCLUSIVE"
+    },
+    {
+      "operator_id": 4,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 4,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 4,
+      "type": "TABLOCK",
+      "value": "INTENT EXCLUSIVE"
+    },
+    {
+      "operator_id": 4,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    }
+  ],
+  "indexes": [
+    {
+      "schema": "SYSIBM",
+      "name": "SQL261110050755440",
+      "table_schema": "TEST_SCHEMA",
+      "table_name": "CRUD_TEST"
+    }
+  ],
+  "analyze": null
+}

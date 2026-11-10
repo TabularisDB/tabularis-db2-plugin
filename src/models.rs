@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
@@ -79,6 +78,10 @@ pub struct ForeignKey {
     pub ref_column: String,
     pub on_delete: Option<String>,
     pub on_update: Option<String>,
+    /// 1-based position of this column within its constraint, so Tabularis
+    /// can put the columns of a composite foreign key back in order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq_in_fk: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -88,6 +91,9 @@ pub struct Index {
     pub is_unique: bool,
     pub is_primary: bool,
     pub seq_in_index: i32,
+    /// True when `column_name` holds an expression rather than a column.
+    #[serde(default)]
+    pub is_expression: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -117,38 +123,96 @@ pub struct BatchStatementResult {
     pub execution_time_ms: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ExplainNode {
-    pub id: String,
-    pub node_type: String,
-    pub relation: Option<String>,
-    pub startup_cost: Option<f64>,
-    pub total_cost: Option<f64>,
-    pub plan_rows: Option<f64>,
-    pub actual_rows: Option<f64>,
-    pub actual_time_ms: Option<f64>,
-    pub actual_loops: Option<u64>,
-    pub buffers_hit: Option<u64>,
-    pub buffers_read: Option<u64>,
-    pub filter: Option<String>,
-    pub index_condition: Option<String>,
-    pub join_type: Option<String>,
-    pub hash_condition: Option<String>,
-    #[serde(default)]
-    pub extra: HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    pub children: Vec<ExplainNode>,
+/// `explain_query`'s answer in Tabularis's raw form: the plan as Db2 wrote
+/// it, for the parser this plugin ships in `explain/` to turn into a tree.
+#[derive(Debug, Serialize)]
+pub struct RawExplain {
+    pub engine: &'static str,
+    pub format: &'static str,
+    /// [`Db2ExplainPayload`] as JSON.
+    pub payload: String,
+    pub original_query: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ExplainPlan {
-    pub root: ExplainNode,
-    pub planning_time_ms: Option<f64>,
-    pub execution_time_ms: Option<f64>,
-    pub original_query: String,
-    pub driver: String,
-    pub has_analyze_data: bool,
-    pub raw_output: Option<String>,
+/// The rows Db2's `EXPLAIN` wrote for one statement, one list per explain
+/// table, with values as Db2 gives them. `explain/src/payload.ts` mirrors
+/// this shape: change both together.
+#[derive(Debug, Serialize, Default)]
+pub struct Db2ExplainPayload {
+    /// Version of this shape; always the first key, so a parser can tell a
+    /// Db2 payload from the first bytes.
+    pub db2_explain: u32,
+    /// The schema the statement was explained in. Objects of that schema are
+    /// named without it.
+    pub schema: String,
+    pub operators: Vec<ExplainOperator>,
+    pub streams: Vec<ExplainStream>,
+    pub predicates: Vec<ExplainPredicate>,
+    pub arguments: Vec<ExplainArgument>,
+    pub indexes: Vec<ExplainIndex>,
+    /// What running the statement showed, when Analyze was asked for.
+    pub analyze: Option<ExplainAnalyze>,
+}
+
+/// One `EXPLAIN_OPERATOR` row.
+#[derive(Debug, Serialize, Default)]
+pub struct ExplainOperator {
+    pub id: i64,
+    #[serde(rename = "type")]
+    pub operator_type: String,
+    pub total_cost: Option<f64>,
+    pub io_cost: Option<f64>,
+    pub cpu_cost: Option<f64>,
+    pub first_row_cost: Option<f64>,
+    pub re_total_cost: Option<f64>,
+    pub buffers: Option<f64>,
+}
+
+/// One `EXPLAIN_STREAM` row ending in an operator. `source_type` is `O` for
+/// an operator and `D` for a data object (a table or an index, named by
+/// `object_schema` and `object_name`, with source id -1).
+#[derive(Debug, Serialize)]
+pub struct ExplainStream {
+    pub source_type: String,
+    pub source_id: i64,
+    pub target_id: i64,
+    pub object_schema: Option<String>,
+    pub object_name: Option<String>,
+    /// Estimated number of rows.
+    pub count: Option<f64>,
+}
+
+/// One `EXPLAIN_PREDICATE` row.
+#[derive(Debug, Serialize)]
+pub struct ExplainPredicate {
+    pub operator_id: i64,
+    pub how_applied: String,
+    pub text: String,
+}
+
+/// One `EXPLAIN_ARGUMENT` row.
+#[derive(Debug, Serialize)]
+pub struct ExplainArgument {
+    pub operator_id: i64,
+    #[serde(rename = "type")]
+    pub argument_type: String,
+    pub value: String,
+}
+
+/// An index the plan reads, with its table (from `SYSCAT.INDEXES`).
+#[derive(Debug, Serialize)]
+pub struct ExplainIndex {
+    pub schema: String,
+    pub name: String,
+    pub table_schema: String,
+    pub table_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExplainAnalyze {
+    /// Rows the statement returned, or changed when it returns none.
+    pub rows: u64,
+    pub elapsed_ms: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,8 +225,15 @@ pub struct TableSchema {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoutineInfo {
     pub name: String,
+    /// `FUNCTION` or `PROCEDURE`.
     pub routine_type: String,
+    /// Left out of the list: Tabularis asks for the definition of the routine
+    /// it opens.
     pub definition: Option<String>,
+    /// The argument types of the routine. Db2 lets routines share a name, so
+    /// Tabularis shows this next to it and sends it back to say which one it
+    /// means. Empty for a routine without arguments.
+    pub identity_args: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -186,7 +257,11 @@ pub struct ColumnDefinition {
     pub is_nullable: bool,
     pub is_pk: bool,
     pub is_auto_increment: bool,
+    #[serde(default)]
     pub default_value: Option<String>,
+    /// Column description; only sent when the user entered one.
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

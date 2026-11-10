@@ -21,3 +21,4 @@ db2-data/
 
 # Tooling pulled in by `npx` (manifest validation, markdownlint)
 node_modules/
+explain/dist/

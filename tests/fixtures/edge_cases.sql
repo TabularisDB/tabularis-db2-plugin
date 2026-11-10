@@ -100,3 +100,70 @@ CREATE TABLE TEST_SCHEMA.PAGING_TEST (
 INSERT INTO TEST_SCHEMA.PAGING_TEST (N, LABEL)
     WITH SEQ (N) AS (VALUES 1 UNION ALL SELECT N + 1 FROM SEQ WHERE N < 1200)
     SELECT N, 'row ' || N FROM SEQ;
+
+-- ---------------------------------------------------------
+-- A table without a primary key or unique index, holding two
+-- identical rows, NULLs and a LOB: rows can only be told apart
+-- by the values of all their columns.
+-- ---------------------------------------------------------
+
+CREATE TABLE TEST_SCHEMA.KEYLESS_TEST (
+    CODE VARCHAR(10),
+    QTY INTEGER,
+    NOTE CLOB(1K),
+    CREATED DATE
+);
+
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('A', 1, 'first', '2024-01-01');
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('A', 1, 'first', '2024-01-01');
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('B', NULL, NULL, NULL);
+INSERT INTO TEST_SCHEMA.KEYLESS_TEST (CODE, QTY, NOTE, CREATED) VALUES ('C', 3, 'third', '2024-03-03');
+
+-- ---------------------------------------------------------
+-- A parent/child pair whose foreign key restricts deletes: a
+-- parent row that still has children cannot be removed.
+-- ---------------------------------------------------------
+
+CREATE TABLE TEST_SCHEMA.FK_PARENT (
+    ID INTEGER NOT NULL,
+    NAME VARCHAR(20),
+    PRIMARY KEY (ID)
+);
+
+CREATE TABLE TEST_SCHEMA.FK_CHILD (
+    ID INTEGER NOT NULL,
+    PARENT_ID INTEGER NOT NULL,
+    PRIMARY KEY (ID),
+    CONSTRAINT FK_CHILD_PARENT FOREIGN KEY (PARENT_ID)
+        REFERENCES TEST_SCHEMA.FK_PARENT (ID) ON DELETE RESTRICT
+);
+
+INSERT INTO TEST_SCHEMA.FK_PARENT (ID, NAME) VALUES (1, 'has children');
+INSERT INTO TEST_SCHEMA.FK_PARENT (ID, NAME) VALUES (2, 'no children');
+INSERT INTO TEST_SCHEMA.FK_CHILD (ID, PARENT_ID) VALUES (10, 1);
+INSERT INTO TEST_SCHEMA.FK_CHILD (ID, PARENT_ID) VALUES (11, 1);
+
+-- ---------------------------------------------------------
+-- A foreign key made of two columns, declared in an order that
+-- differs from the alphabetical one, with a rule on updates.
+-- ---------------------------------------------------------
+
+CREATE TABLE TEST_SCHEMA.COMPOSITE_PARENT (
+    REGION CHAR(2) NOT NULL,
+    CODE INTEGER NOT NULL,
+    LABEL VARCHAR(30),
+    PRIMARY KEY (REGION, CODE)
+);
+
+CREATE TABLE TEST_SCHEMA.COMPOSITE_CHILD (
+    ID INTEGER NOT NULL,
+    PARENT_REGION CHAR(2),
+    PARENT_CODE INTEGER,
+    PRIMARY KEY (ID),
+    CONSTRAINT FK_COMPOSITE FOREIGN KEY (PARENT_REGION, PARENT_CODE)
+        REFERENCES TEST_SCHEMA.COMPOSITE_PARENT (REGION, CODE)
+        ON DELETE CASCADE ON UPDATE RESTRICT
+);
+
+INSERT INTO TEST_SCHEMA.COMPOSITE_PARENT (REGION, CODE, LABEL) VALUES ('EU', 1, 'Europe one');
+INSERT INTO TEST_SCHEMA.COMPOSITE_CHILD (ID, PARENT_REGION, PARENT_CODE) VALUES (1, 'EU', 1);

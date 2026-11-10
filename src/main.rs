@@ -7,13 +7,14 @@ mod utils;
 
 use client::Session;
 use error::PluginResult;
-use handlers::{crud, ddl, metadata, query};
+use handlers::{crud, ddl, explain, metadata, query};
 use models::{ColumnDefinition, ConnectionParams, PluginSettings};
 use rpc::{RpcError, RpcResult};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead};
+use utils::binding::DEFAULT_MAX_BLOB_SIZE;
 
 /// The arguments of one JSON-RPC request, with the plugin settings needed to
 /// act on them.
@@ -38,6 +39,17 @@ impl Request<'_> {
     fn required(&self, keys: &[&str]) -> Result<&str, RpcError> {
         self.text(keys)
             .ok_or_else(|| RpcError::invalid_params(format!("Missing parameter '{}'", keys[0])))
+    }
+
+    /// The routine a request is about. `identity_args` is read as it is:
+    /// an empty signature is the one of a routine without arguments, not a
+    /// missing value.
+    fn routine(&self) -> Result<metadata::RoutineTarget<'_>, RpcError> {
+        Ok(metadata::RoutineTarget {
+            name: self.required(&["routine_name", "routine"])?,
+            routine_type: self.text(&["routine_type"]),
+            identity_args: self.params.get("identity_args").and_then(Value::as_str),
+        })
     }
 
     fn connection(&self) -> Result<ConnectionParams, RpcError> {
@@ -111,6 +123,36 @@ impl Request<'_> {
                     .map(ToString::to_string)
                     .collect()
             })
+    }
+
+    /// A JSON object argument (`data`, `pk_map`); a missing one is empty.
+    fn map(&self, key: &str) -> Result<HashMap<String, Value>, RpcError> {
+        match self.params.get(key) {
+            None | Some(Value::Null) => Ok(HashMap::new()),
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|error| RpcError::invalid_params(format!("Invalid '{key}': {error}"))),
+        }
+    }
+
+    /// The key values that identify a row: `pk_map`, or the single
+    /// `pk_col` / `pk_val` pair Tabularis sent before 0.13.4.
+    fn row_keys(&self) -> Result<HashMap<String, Value>, RpcError> {
+        let mut keys = self.map("pk_map")?;
+        if keys.is_empty() {
+            if let Some(column) = self.text(&["pk_col"]) {
+                let value = self.params.get("pk_val").cloned().unwrap_or(Value::Null);
+                keys.insert(column.to_string(), value);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Largest BLOB the host allows in a write, from its settings.
+    fn max_blob_size(&self) -> u64 {
+        self.params
+            .get("max_blob_size")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_MAX_BLOB_SIZE)
     }
 
     fn u32(&self, keys: &[&str]) -> Option<u32> {
@@ -202,6 +244,24 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             reply(metadata::get_columns(&session, &schema, view))
         }
 
+        "create_view" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            let definition = request.required(&["definition"])?;
+            reply(metadata::create_view(&session, &schema, view, definition).map(|()| Value::Null))
+        }
+        "alter_view" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            let definition = request.required(&["definition"])?;
+            reply(metadata::alter_view(&session, &schema, view, definition).map(|()| Value::Null))
+        }
+        "drop_view" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            reply(metadata::drop_view(&session, &schema, view).map(|()| Value::Null))
+        }
+
         // -- Routines --------------------------------------------------------
         "get_routines" => {
             let (session, schema) = request.schema_session()?;
@@ -209,13 +269,17 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         }
         "get_routine_parameters" => {
             let (session, schema) = request.schema_session()?;
-            let routine = request.required(&["routine_name", "routine"])?;
-            reply(metadata::get_routine_parameters(&session, &schema, routine))
+            let routine = request.routine()?;
+            reply(metadata::get_routine_parameters(
+                &session, &schema, &routine,
+            ))
         }
         "get_routine_definition" => {
             let (session, schema) = request.schema_session()?;
-            let routine = request.required(&["routine_name", "routine"])?;
-            reply(metadata::get_routine_definition(&session, &schema, routine))
+            let routine = request.routine()?;
+            reply(metadata::get_routine_definition(
+                &session, &schema, &routine,
+            ))
         }
 
         // -- Queries ---------------------------------------------------------
@@ -241,9 +305,10 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             )))
         }
         "explain_query" => {
-            let (session, _) = request.schema_session()?;
-            reply(query::explain_query(
+            let (session, schema) = request.schema_session()?;
+            reply(explain::explain_query(
                 &session,
+                &schema,
                 request.text(&["query"]).unwrap_or_default(),
                 request
                     .params
@@ -256,19 +321,33 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         // -- Records ---------------------------------------------------------
         "insert_record" => {
             let (session, schema) = request.schema_session()?;
-            let data: HashMap<String, Value> = serde_json::from_value(
-                request
-                    .params
-                    .get("data")
-                    .cloned()
-                    .unwrap_or_else(|| json!({})),
-            )
-            .map_err(|error| RpcError::invalid_params(format!("Invalid 'data': {error}")))?;
             reply(crud::insert_record(
                 &session,
                 request.required(&["table"])?,
-                &data,
-                Some(&schema),
+                &request.map("data")?,
+                &schema,
+                request.max_blob_size(),
+            ))
+        }
+        "fetch_blob_as_data_url" => {
+            let (session, schema) = request.schema_session()?;
+            reply(crud::fetch_blob_as_data_url(
+                &session,
+                request.required(&["table"])?,
+                request.required(&["col_name"])?,
+                &request.map("pk_map")?,
+                &schema,
+            ))
+        }
+        "save_blob_to_file" => {
+            let (session, schema) = request.schema_session()?;
+            reply(crud::save_blob_to_file(
+                &session,
+                request.required(&["table"])?,
+                request.required(&["col_name"])?,
+                &request.map("pk_map")?,
+                &schema,
+                request.required(&["file_path"])?,
             ))
         }
         "update_record" => {
@@ -276,11 +355,11 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             reply(crud::update_record(
                 &session,
                 request.required(&["table"])?,
-                request.text(&["pk_col"]).unwrap_or_default(),
-                request.params.get("pk_val").unwrap_or(&Value::Null),
-                request.text(&["col_name"]).unwrap_or_default(),
+                &request.row_keys()?,
+                request.required(&["col_name"])?,
                 request.params.get("new_val").unwrap_or(&Value::Null),
-                Some(&schema),
+                &schema,
+                request.max_blob_size(),
             ))
         }
         "delete_record" => {
@@ -288,31 +367,30 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             reply(crud::delete_record(
                 &session,
                 request.required(&["table"])?,
-                request.text(&["pk_col"]).unwrap_or_default(),
-                request.params.get("pk_val").unwrap_or(&Value::Null),
-                Some(&schema),
+                &request.row_keys()?,
+                &schema,
             ))
         }
 
         // -- DDL generation (pure SQL builders, no connection) ----------------
-        "get_create_table_sql" => Ok(json!(ddl::get_create_table_sql(
+        "get_create_table_sql" => reply(ddl::get_create_table_sql(
             request.text(&["table_name", "table"]).unwrap_or_default(),
             &request.columns("columns")?,
             request.text(&["schema"]),
-        ))),
+        )),
         "get_add_column_sql" => Ok(json!(ddl::get_add_column_sql(
-            request.text(&["table"]).unwrap_or_default(),
+            request.required(&["table"])?,
             &request.column("column")?,
             request.text(&["schema"]),
         ))),
         "get_alter_column_sql" => Ok(json!(ddl::get_alter_column_sql(
-            request.text(&["table"]).unwrap_or_default(),
+            request.required(&["table"])?,
             &request.column("old_column")?,
             &request.column("new_column")?,
             request.text(&["schema"]),
         ))),
-        "get_create_index_sql" => Ok(json!(ddl::get_create_index_sql(
-            request.text(&["table"]).unwrap_or_default(),
+        "get_create_index_sql" => reply(ddl::get_create_index_sql(
+            request.required(&["table"])?,
             request.text(&["index_name"]).unwrap_or_default(),
             &request.strings("columns").unwrap_or_default(),
             request
@@ -321,36 +399,50 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             request.text(&["schema"]),
-        ))),
-        "get_create_foreign_key_sql" => Ok(json!(ddl::get_create_foreign_key_sql(
-            request.text(&["table"]).unwrap_or_default(),
+        )),
+        "get_create_foreign_key_sql" => reply(ddl::get_create_foreign_key_sql(
+            request.required(&["table"])?,
             request.text(&["fk_name"]).unwrap_or_default(),
-            request.text(&["column"]).unwrap_or_default(),
-            request.text(&["ref_table"]).unwrap_or_default(),
-            request.text(&["ref_column"]).unwrap_or_default(),
+            request.required(&["column"])?,
+            request.required(&["ref_table"])?,
+            request.required(&["ref_column"])?,
             request.text(&["on_delete"]),
             request.text(&["on_update"]),
             request.text(&["schema"]),
-        ))),
+        )),
+        "get_table_ddl" => {
+            let (session, schema) = request.schema_session()?;
+            reply(metadata::get_table_ddl(
+                &session,
+                &schema,
+                request.required(&["table"])?,
+            ))
+        }
 
         // -- DDL execution ---------------------------------------------------
         "drop_index" => {
             let (session, schema) = request.schema_session()?;
-            let sql = ddl::drop_index_sql(
-                request.text(&["table"]).unwrap_or_default(),
-                request.required(&["index_name"])?,
-                Some(&schema),
-            );
-            reply(session.execute(&sql).map(|_| Value::Null))
+            reply(
+                metadata::drop_index(
+                    &session,
+                    &schema,
+                    request.required(&["table"])?,
+                    request.required(&["index_name"])?,
+                )
+                .map(|()| Value::Null),
+            )
         }
         "drop_foreign_key" => {
             let (session, schema) = request.schema_session()?;
-            let sql = ddl::drop_foreign_key_sql(
-                request.required(&["table"])?,
-                request.required(&["fk_name", "constraint_name"])?,
-                Some(&schema),
-            );
-            reply(session.execute(&sql).map(|_| Value::Null))
+            reply(
+                metadata::drop_foreign_key(
+                    &session,
+                    &schema,
+                    request.required(&["table"])?,
+                    request.required(&["fk_name", "constraint_name"])?,
+                )
+                .map(|()| Value::Null),
+            )
         }
 
         _ => Err(RpcError::method_not_found(method)),

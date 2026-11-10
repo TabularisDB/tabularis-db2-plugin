@@ -1,0 +1,337 @@
+{
+  "db2_explain": 1,
+  "schema": "TEST_SCHEMA",
+  "operators": [
+    {
+      "id": 1,
+      "type": "RETURN",
+      "total_cost": 6.77266502380371,
+      "io_cost": 1.0,
+      "cpu_cost": 81130.703125,
+      "first_row_cost": 6.77210521697998,
+      "re_total_cost": 0.00221551535651088,
+      "buffers": 0.0
+    },
+    {
+      "id": 2,
+      "type": "FILTER",
+      "total_cost": 6.77256679534912,
+      "io_cost": 1.0,
+      "cpu_cost": 80092.3671875,
+      "first_row_cost": 6.77206325531006,
+      "re_total_cost": 0.00211742520332336,
+      "buffers": 0.0
+    },
+    {
+      "id": 3,
+      "type": "GRPBY",
+      "total_cost": 6.77218818664551,
+      "io_cost": 1.0,
+      "cpu_cost": 76087.3671875,
+      "first_row_cost": 6.77181148529053,
+      "re_total_cost": 0.0017390773864463,
+      "buffers": 0.0
+    },
+    {
+      "id": 4,
+      "type": "TBSCAN",
+      "total_cost": 6.77187490463257,
+      "io_cost": 1.0,
+      "cpu_cost": 72769.3671875,
+      "first_row_cost": 6.77173328399658,
+      "re_total_cost": 0.00142562971450388,
+      "buffers": 0.0
+    },
+    {
+      "id": 5,
+      "type": "SORT",
+      "total_cost": 6.77158784866333,
+      "io_cost": 1.0,
+      "cpu_cost": 69732.3671875,
+      "first_row_cost": 6.77158784866333,
+      "re_total_cost": 0.00113872776273638,
+      "buffers": 1.0
+    },
+    {
+      "id": 6,
+      "type": "TBSCAN",
+      "total_cost": 6.77091836929321,
+      "io_cost": 1.0,
+      "cpu_cost": 62647.0,
+      "first_row_cost": 6.76994180679321,
+      "re_total_cost": 0.00113872776273638,
+      "buffers": 1.0
+    }
+  ],
+  "streams": [
+    {
+      "source_type": "O",
+      "source_id": 2,
+      "target_id": 1,
+      "object_schema": null,
+      "object_name": null,
+      "count": 1.33333325386047
+    },
+    {
+      "source_type": "O",
+      "source_id": 3,
+      "target_id": 2,
+      "object_schema": null,
+      "object_name": null,
+      "count": 4.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 4,
+      "target_id": 3,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 5,
+      "target_id": 4,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 6,
+      "target_id": 5,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 6,
+      "object_schema": "TEST_SCHEMA",
+      "object_name": "EMPLOYEES",
+      "count": 6.0
+    }
+  ],
+  "predicates": [
+    {
+      "operator_id": 2,
+      "how_applied": "RESID",
+      "text": "(1 < Q3.$C0)"
+    }
+  ],
+  "arguments": [
+    {
+      "operator_id": 1,
+      "type": "BLDLEVEL",
+      "value": "DB2 v12.1.5.0 : special_85816"
+    },
+    {
+      "operator_id": 1,
+      "type": "CPUCACHE",
+      "value": "1048576"
+    },
+    {
+      "operator_id": 1,
+      "type": "HEAPUSE",
+      "value": "96 Pages"
+    },
+    {
+      "operator_id": 1,
+      "type": "PLANID",
+      "value": "417c82bd482971df"
+    },
+    {
+      "operator_id": 1,
+      "type": "PREPTIME",
+      "value": "44 milliseconds"
+    },
+    {
+      "operator_id": 1,
+      "type": "SEMEVID",
+      "value": "494d25221635e5f4"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTHEAP",
+      "value": "8192"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTID",
+      "value": "d570109be850a3b3"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTID",
+      "value": "0"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTNM",
+      "value": "SYSTEM"
+    },
+    {
+      "operator_id": 3,
+      "type": "AGGMODE",
+      "value": "COMPLETE"
+    },
+    {
+      "operator_id": 3,
+      "type": "GROUPBYC",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 3,
+      "type": "GROUPBYN",
+      "value": "1"
+    },
+    {
+      "operator_id": 3,
+      "type": "GROUPBYR",
+      "value": "1: Q2.DEPT_ID"
+    },
+    {
+      "operator_id": 3,
+      "type": "ONEFETCH",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 4,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 4,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 4,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 4,
+      "type": "SPEED",
+      "value": "SLOW"
+    },
+    {
+      "operator_id": 4,
+      "type": "THROTTLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 4,
+      "type": "VISIBLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 4,
+      "type": "WRAPPING",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 5,
+      "type": "DUPLWARN",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 5,
+      "type": "KEYS",
+      "value": "4"
+    },
+    {
+      "operator_id": 5,
+      "type": "NUMROWS",
+      "value": "6"
+    },
+    {
+      "operator_id": 5,
+      "type": "ROWWIDTH",
+      "value": "16.000000"
+    },
+    {
+      "operator_id": 5,
+      "type": "SORTKEY",
+      "value": "1: Q2.DEPT_ID(A)"
+    },
+    {
+      "operator_id": 5,
+      "type": "TEMPSIZE",
+      "value": "4096"
+    },
+    {
+      "operator_id": 5,
+      "type": "UNIQUE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 6,
+      "type": "CUR_COMM",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 6,
+      "type": "LCKAVOID",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 6,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 6,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 6,
+      "type": "ROWLOCK",
+      "value": "SHARE (CS/RS)"
+    },
+    {
+      "operator_id": 6,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 6,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 6,
+      "type": "SPEED",
+      "value": "FAST"
+    },
+    {
+      "operator_id": 6,
+      "type": "TABLOCK",
+      "value": "INTENT SHARE"
+    },
+    {
+      "operator_id": 6,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    },
+    {
+      "operator_id": 6,
+      "type": "THROTTLE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 6,
+      "type": "VISIBLE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 6,
+      "type": "WRAPPING",
+      "value": "TRUE"
+    }
+  ],
+  "indexes": [],
+  "analyze": null
+}

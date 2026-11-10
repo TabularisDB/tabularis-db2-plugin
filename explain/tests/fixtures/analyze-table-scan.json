@@ -1,0 +1,332 @@
+{
+  "db2_explain": 1,
+  "schema": "TEST_SCHEMA",
+  "operators": [
+    {
+      "id": 1,
+      "type": "RETURN",
+      "total_cost": 45.2253875732422,
+      "io_cost": 12.8285942077637,
+      "cpu_cost": 4771023.0,
+      "first_row_cost": 38.0645790100098,
+      "re_total_cost": 0.34652191400528,
+      "buffers": 13.8285942077637
+    },
+    {
+      "id": 2,
+      "type": "FETCH",
+      "total_cost": 45.2253875732422,
+      "io_cost": 12.8285942077637,
+      "cpu_cost": 4771023.0,
+      "first_row_cost": 38.0645790100098,
+      "re_total_cost": 0.34652191400528,
+      "buffers": 13.8285942077637
+    },
+    {
+      "id": 3,
+      "type": "RIDSCN",
+      "total_cost": 31.2983436584473,
+      "io_cost": 4.58164072036743,
+      "cpu_cost": 3213179.5,
+      "first_row_cost": 31.2982215881348,
+      "re_total_cost": 0.205682098865509,
+      "buffers": 5.58164072036743
+    },
+    {
+      "id": 4,
+      "type": "SORT",
+      "total_cost": 31.2982215881348,
+      "io_cost": 4.58164072036743,
+      "cpu_cost": 3211892.5,
+      "first_row_cost": 31.2982215881348,
+      "re_total_cost": 0.179567560553551,
+      "buffers": 5.58164072036743
+    },
+    {
+      "id": 5,
+      "type": "IXSCAN",
+      "total_cost": 31.1833419799805,
+      "io_cost": 4.58164072036743,
+      "cpu_cost": 1995834.375,
+      "first_row_cost": 6.77037239074707,
+      "re_total_cost": 0.179567560553551,
+      "buffers": 5.58164072036743
+    }
+  ],
+  "streams": [
+    {
+      "source_type": "O",
+      "source_id": 2,
+      "target_id": 1,
+      "object_schema": null,
+      "object_name": null,
+      "count": 1099.59375
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 2,
+      "object_schema": "TEST_SCHEMA",
+      "object_name": "PAGING_TEST",
+      "count": 1200.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 3,
+      "target_id": 2,
+      "object_schema": null,
+      "object_name": null,
+      "count": 1099.59375
+    },
+    {
+      "source_type": "O",
+      "source_id": 4,
+      "target_id": 3,
+      "object_schema": null,
+      "object_name": null,
+      "count": 1099.59375
+    },
+    {
+      "source_type": "O",
+      "source_id": 5,
+      "target_id": 4,
+      "object_schema": null,
+      "object_name": null,
+      "count": 1099.59375
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 5,
+      "object_schema": "SYSIBM",
+      "object_name": "SQL261110050800200",
+      "count": 1200.0
+    }
+  ],
+  "predicates": [
+    {
+      "operator_id": 2,
+      "how_applied": "SARG",
+      "text": "(100 < Q1.N)"
+    },
+    {
+      "operator_id": 5,
+      "how_applied": "START",
+      "text": "(100 < Q1.N)"
+    }
+  ],
+  "arguments": [
+    {
+      "operator_id": 1,
+      "type": "BLDLEVEL",
+      "value": "DB2 v12.1.5.0 : special_85816"
+    },
+    {
+      "operator_id": 1,
+      "type": "CPUCACHE",
+      "value": "1048576"
+    },
+    {
+      "operator_id": 1,
+      "type": "HEAPUSE",
+      "value": "96 Pages"
+    },
+    {
+      "operator_id": 1,
+      "type": "PLANID",
+      "value": "92e1e09455c253e6"
+    },
+    {
+      "operator_id": 1,
+      "type": "PREPTIME",
+      "value": "44 milliseconds"
+    },
+    {
+      "operator_id": 1,
+      "type": "SEMEVID",
+      "value": "494d25221635e5f4"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTHEAP",
+      "value": "8192"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTID",
+      "value": "1ec9b7fcb84783fc"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTID",
+      "value": "0"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTNM",
+      "value": "SYSTEM"
+    },
+    {
+      "operator_id": 2,
+      "type": "CUR_COMM",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 2,
+      "type": "LCKAVOID",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 2,
+      "type": "MAX RIDS",
+      "value": "1024"
+    },
+    {
+      "operator_id": 2,
+      "type": "PREFETCH",
+      "value": "LIST"
+    },
+    {
+      "operator_id": 2,
+      "type": "ROWLOCK",
+      "value": "SHARE (CS/RS)"
+    },
+    {
+      "operator_id": 2,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 2,
+      "type": "SPEED",
+      "value": "SLOW"
+    },
+    {
+      "operator_id": 2,
+      "type": "TABLOCK",
+      "value": "INTENT SHARE"
+    },
+    {
+      "operator_id": 2,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    },
+    {
+      "operator_id": 2,
+      "type": "THROTTLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 2,
+      "type": "VISIBLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 2,
+      "type": "WRAPPING",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 3,
+      "type": "NUMROWS",
+      "value": "1100"
+    },
+    {
+      "operator_id": 4,
+      "type": "DUPLWARN",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 4,
+      "type": "KEYS",
+      "value": "1100"
+    },
+    {
+      "operator_id": 4,
+      "type": "NUMROWS",
+      "value": "1100"
+    },
+    {
+      "operator_id": 4,
+      "type": "ROWWIDTH",
+      "value": "20.000000"
+    },
+    {
+      "operator_id": 4,
+      "type": "SORTKEY",
+      "value": "1: Q1.$RID$(A)"
+    },
+    {
+      "operator_id": 4,
+      "type": "TEMPSIZE",
+      "value": "4096"
+    },
+    {
+      "operator_id": 4,
+      "type": "UNIQUE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "CUR_COMM",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "LCKAVOID",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "MAXPAGES",
+      "value": "4"
+    },
+    {
+      "operator_id": 5,
+      "type": "PREFETCH",
+      "value": "SEQUENTIAL,READAHEAD"
+    },
+    {
+      "operator_id": 5,
+      "type": "ROWLOCK",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 5,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 5,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "TABLOCK",
+      "value": "INTENT NONE"
+    },
+    {
+      "operator_id": 5,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    },
+    {
+      "operator_id": 5,
+      "type": "UR_EXTRA",
+      "value": "TRUE"
+    }
+  ],
+  "indexes": [
+    {
+      "schema": "SYSIBM",
+      "name": "SQL261110050800200",
+      "table_schema": "TEST_SCHEMA",
+      "table_name": "PAGING_TEST"
+    }
+  ],
+  "analyze": {
+    "rows": 1100,
+    "elapsed_ms": 2.363615
+  }
+}
