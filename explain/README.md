@@ -10,6 +10,32 @@ tables for one statement (`EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`,
 plan reads) and, with Analyze, the row count and elapsed time of the run.
 `src/payload.ts` describes it; the plugin's `src/models.rs` produces it.
 
+## npm usage
+
+```bash
+pnpm add @tabularis/explain @tabularis/explain-db2
+```
+
+Import `@tabularis/explain-db2` to register the parser with
+`@tabularis/explain` (version 0.2.0 or newer), or import `parseDb2Explain`
+directly to parse a payload string.
+
+```ts
+import "@tabularis/explain-db2";
+import { parseRawExplain } from "@tabularis/explain";
+
+const plan = parseRawExplain({
+  engine: "db2",
+  format: "db2-explain-tables-json",
+  payload,
+  original_query: "SELECT * FROM orders",
+});
+```
+
+The release workflow publishes the package using npm Trusted Publishing.
+Configure the trusted publisher on npm for `TabularisDB`, repository
+`tabularis-db2-plugin`, and workflow `release.yml` before the first release.
+
 The parser:
 
 - makes tables and indexes the `relation` of the operator that reads them

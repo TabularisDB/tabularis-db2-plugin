@@ -1,7 +1,9 @@
 {
   "name": "@tabularis/explain-db2",
   "version": "0.1.0",
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "IBM Db2 explain-table parser for Tabularis Visual EXPLAIN",
   "license": "Apache-2.0",
   "homepage": "https://github.com/TabularisDB/tabularis-db2-plugin/tree/master/explain",
