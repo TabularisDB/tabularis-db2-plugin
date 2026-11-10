@@ -66,7 +66,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Query execution | Verified | [#2](https://github.com/TabularisDB/tabularis-db2-plugin/issues/2) |
 | Insert record | Verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
 | Update record | Verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
-| Delete record | Not yet verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
+| Delete record | Verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
 | DDL generation | Not yet verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
 | View support | Not yet verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
 | Index management | Not yet verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
@@ -179,7 +179,7 @@ The code is intentionally split by responsibility:
 | `insert_record` | Inserts a row, rendering each value for its column type (numbers validated, text and binary data bound as parameters, `NULL`, column defaults, BLOB uploads) |
 | `fetch_blob_as_data_url` / `save_blob_to_file` | Read the whole value of a binary column for the preview and for export |
 | `update_record` | Sets one column of one row, found by its primary key (single or composite) or, for a table without one, by the values of all its columns |
-| `delete_record` | Deletes a row by primary key column |
+| `delete_record` | Deletes one row, found the same way as for `update_record` |
 | `get_schema_snapshot` | Returns all tables with columns and foreign keys |
 | `get_all_columns_batch` | Returns all column metadata for a schema |
 | `get_all_foreign_keys_batch` | Returns all FK metadata for a schema |

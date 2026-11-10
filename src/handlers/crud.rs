@@ -3,7 +3,7 @@ use crate::error::PluginResult;
 use crate::utils::binding::{bind_value, ColumnSpec};
 use crate::utils::blob::encode_blob_full;
 use crate::utils::identifiers::{quote_identifier, quote_qualified_name};
-use crate::utils::values::{json_to_sql_literal, string_literal};
+use crate::utils::values::string_literal;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -273,20 +273,30 @@ fn row_not_found(target: &str) -> String {
     )
 }
 
+/// Deletes one row and returns the number of rows deleted (1).
+///
+/// The row is found the same way as for [`update_record`], and the delete
+/// goes through `DELETE FROM (SELECT ... FETCH FIRST 1 ROW ONLY)` so that
+/// only one of several identical rows of a keyless table is removed. A key
+/// that matches nothing is an error: the row is already gone or was changed.
 pub fn delete_record(
     session: &Session,
     table: &str,
-    pk_col: &str,
-    pk_val: &Value,
-    schema: Option<&str>,
+    pk_map: &HashMap<String, Value>,
+    schema: &str,
 ) -> PluginResult<u64> {
-    let sql = format!(
-        "DELETE FROM {} WHERE {} = {}",
-        quote_qualified_name(schema, table),
-        quote_identifier(pk_col),
-        json_to_sql_literal(pk_val)
-    );
-    session.execute(&sql)
+    let specs = column_specs(session, schema, table)?;
+    let target = quote_qualified_name(Some(schema), table);
+
+    let mut params: Vec<Param> = Vec::new();
+    let condition = row_condition(&specs, pk_map, &target, &mut params)?;
+    let sql =
+        format!("DELETE FROM (SELECT * FROM {target} WHERE {condition} FETCH FIRST 1 ROW ONLY)");
+    let affected = session.execute_with(&sql, &params)?;
+    if affected == 0 {
+        return Err(row_not_found(&target));
+    }
+    Ok(affected)
 }
 
 #[cfg(test)]

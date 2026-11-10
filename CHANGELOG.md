@@ -119,6 +119,19 @@ All notable changes to this project will be documented in this file.
     (numbers validated, text and BLOBs bound, `NULL`, `DEFAULT`), and the
     number of rows changed is returned.
 
+- Deleting records, verified against Db2 12.1 and Tabularis 0.32.0 (#5):
+  - `delete_record` reads the row's key from `pk_map`, like
+    `update_record`: it generated `DELETE ... WHERE "" = ...` (`SQL0104N`)
+    and no row could be deleted from the grid.
+  - Composite keys and tables without a primary key work as for updates,
+    and exactly one row is deleted when several are identical.
+  - No key values, or a key that matches no row, is an error with a clear
+    message instead of invalid SQL or a silent no-op.
+  - A delete stopped by a foreign key reports Db2's message, which names
+    the relationship (`SQL0532N ... "TEST_SCHEMA.FK_CHILD.FK_CHILD_PARENT"
+    restricts the deletion`).
+  - The number of rows deleted is returned.
+
 ### Added
 
 - `fetch_blob_as_data_url` and `save_blob_to_file`: the whole value of a
