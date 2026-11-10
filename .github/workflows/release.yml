@@ -92,8 +92,11 @@ jobs:
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary-suffix: ""
+          # Built natively on an Intel runner: Homebrew's installer refuses
+          # x86_64 under Rosetta on Apple Silicon, so the unixODBC an Intel
+          # build links against can no longer be installed there.
           - platform-label: darwin-x64
-            runner: macos-latest
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             binary-suffix: ""
           - platform-label: darwin-arm64
@@ -119,16 +122,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unixodbc-dev zip
 
-      - name: Install ODBC build dependencies (macOS native)
-        if: runner.os == 'macOS' && matrix.target == 'aarch64-apple-darwin'
+      - name: Install ODBC build dependencies (macOS)
+        if: runner.os == 'macOS'
         run: brew install unixodbc
-
-      - name: Install ODBC build dependencies (macOS x86_64 cross-compile)
-        if: runner.os == 'macOS' && matrix.target == 'x86_64-apple-darwin'
-        run: |
-          softwareupdate --install-rosetta --agree-to-license || true
-          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install unixodbc
 
       - name: Build
         env:
