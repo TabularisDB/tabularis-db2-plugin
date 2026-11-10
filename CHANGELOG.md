@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-10
+
 ### Fixed
 
 - Schema and object browsing, verified against Db2 12.1 and Tabularis 0.32.0
@@ -279,6 +281,15 @@ All notable changes to this project will be documented in this file.
   (`get_schema_snapshot` opened three).
 - `connect_timeout_secs` from the connection settings is honoured as the
   login timeout.
+
+### Dependencies
+
+- `odbc-api` 24.1.1 → 29.3.0 (#19). The raw ODBC paths for the IBM
+  clidriver's 32-bit lengths are unchanged and pass the live Db2 suite.
+- `serde` 1.0.228 → 1.0.229 (#20).
+- `serde_json` 1.0.149 → 1.0.154 (#21).
+- The Visual EXPLAIN parser stays on TypeScript 5.9: TypeScript 7 drops the
+  compiler API its declaration build needs (#33).
 
 ## [0.0.3] - 2026-08-06
 

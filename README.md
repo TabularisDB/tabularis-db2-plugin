@@ -16,7 +16,6 @@
 
 <p align="center">
 
-![Status](https://img.shields.io/badge/status-WIP-red?style=flat)
 ![Release](https://img.shields.io/github/v/release/TabularisDB/tabularis-db2-plugin?include_prereleases&style=flat)
 ![Downloads](https://img.shields.io/github/downloads/TabularisDB/tabularis-db2-plugin/total.svg?style=flat)
 ![CI](https://github.com/TabularisDB/tabularis-db2-plugin/workflows/CI/badge.svg)
@@ -24,15 +23,13 @@
 
 </p>
 
-> **Work in progress** — this plugin is under active development. See the [verification checklist](#verification-checklist) below for the current status.
-
 An [IBM Db2](https://www.ibm.com/products/db2) plugin for [Tabularis](https://github.com/TabularisDB/tabularis), the open-source database client.
 
 This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas and objects, run SQL queries, perform inline CRUD operations, and generate DDL through the Tabularis JSON-RPC plugin interface.
 
-> **Requires Tabularis v0.25.0 or later.** That is the first release that reads
-> the manifest's stable `id` (`db2`) separately from its display name (`Db2`);
-> the plugin will not load on earlier versions of
+> **Requires Tabularis v0.30.0 or later.** That is the first release that
+> serves a plugin's Visual EXPLAIN parser to Tabularis Web as well as the
+> desktop app; the plugin will not load on earlier versions of
 > [Tabularis](https://github.com/TabularisDB/tabularis).
 
 **Discord** - [Join our discord server](https://discord.com/invite/K2hmhfHRSt) and chat with the maintainers.
@@ -58,6 +55,10 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 - [License](#license)
 
 ## Verification Checklist
+
+Every feature below was verified against Db2 12.1 Community Edition and
+Tabularis 0.32.0, through the live integration suite and in the Tabularis UI;
+the linked issues carry the results.
 
 | Feature | Status | Issue |
 |---|---|---|
