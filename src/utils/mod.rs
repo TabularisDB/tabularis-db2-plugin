@@ -2,6 +2,7 @@ pub mod binding;
 pub mod blob;
 pub mod identifiers;
 pub mod pagination;
+pub mod routines;
 pub mod types;
 pub mod values;
 pub mod views;

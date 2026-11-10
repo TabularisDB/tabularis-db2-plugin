@@ -41,6 +41,17 @@ impl Request<'_> {
             .ok_or_else(|| RpcError::invalid_params(format!("Missing parameter '{}'", keys[0])))
     }
 
+    /// The routine a request is about. `identity_args` is read as it is:
+    /// an empty signature is the one of a routine without arguments, not a
+    /// missing value.
+    fn routine(&self) -> Result<metadata::RoutineTarget<'_>, RpcError> {
+        Ok(metadata::RoutineTarget {
+            name: self.required(&["routine_name", "routine"])?,
+            routine_type: self.text(&["routine_type"]),
+            identity_args: self.params.get("identity_args").and_then(Value::as_str),
+        })
+    }
+
     fn connection(&self) -> Result<ConnectionParams, RpcError> {
         let raw = self.params.get("params").unwrap_or(&Value::Null);
         let parsed: ConnectionParams = serde_json::from_value(raw.clone())
@@ -258,13 +269,17 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         }
         "get_routine_parameters" => {
             let (session, schema) = request.schema_session()?;
-            let routine = request.required(&["routine_name", "routine"])?;
-            reply(metadata::get_routine_parameters(&session, &schema, routine))
+            let routine = request.routine()?;
+            reply(metadata::get_routine_parameters(
+                &session, &schema, &routine,
+            ))
         }
         "get_routine_definition" => {
             let (session, schema) = request.schema_session()?;
-            let routine = request.required(&["routine_name", "routine"])?;
-            reply(metadata::get_routine_definition(&session, &schema, routine))
+            let routine = request.routine()?;
+            reply(metadata::get_routine_definition(
+                &session, &schema, &routine,
+            ))
         }
 
         // -- Queries ---------------------------------------------------------

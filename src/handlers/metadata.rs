@@ -4,6 +4,9 @@ use crate::models::{
     ForeignKey, Index, RoutineInfo, RoutineParameter, TableColumn, TableInfo, TableSchema, ViewInfo,
 };
 use crate::utils::identifiers::{quote_identifier, quote_qualified_name};
+use crate::utils::routines::{
+    parameter_role, routine_label, routine_type, signature, ParameterRole,
+};
 use crate::utils::types::describe_catalog_type;
 use crate::utils::values::string_literal;
 use crate::utils::views::{is_create_view_statement, parse_view_text, view_query};
@@ -409,71 +412,261 @@ pub fn drop_index(
     session.execute(&sql).map(|_| ())
 }
 
-pub fn get_routines(session: &Session, schema: &str) -> PluginResult<Vec<RoutineInfo>> {
+/// A routine as the catalog describes it. `SPECIFICNAME` is what identifies
+/// it: Db2 lets routines of a schema share a name.
+struct CatalogRoutine {
+    specific_name: String,
+    name: String,
+    routine_type: &'static str,
+    /// `ORIGIN`: `Q` for a routine with an SQL body, `E` for an external
+    /// one, `B` for one built into Db2.
+    origin: String,
+    language: String,
+    parameters: Vec<CatalogParameter>,
+}
+
+struct CatalogParameter {
+    role: ParameterRole,
+    ordinal: i32,
+    name: String,
+    data_type: String,
+}
+
+impl CatalogRoutine {
+    fn arguments(&self) -> impl Iterator<Item = &CatalogParameter> {
+        self.parameters
+            .iter()
+            .filter(|parameter| matches!(parameter.role, ParameterRole::Argument(_)))
+    }
+
+    fn signature(&self) -> String {
+        let types: Vec<&str> = self
+            .arguments()
+            .map(|parameter| parameter.data_type.as_str())
+            .collect();
+        signature(&types)
+    }
+}
+
+/// The functions and procedures of a schema with their parameters, the
+/// ones named `routine_name` when given. Routines of a module are left out:
+/// they are not called by schema and name alone.
+fn catalog_routines(
+    session: &Session,
+    schema: &str,
+    routine_name: Option<&str>,
+) -> PluginResult<Vec<CatalogRoutine>> {
+    let name_filter = routine_name
+        .map(|name| format!(" AND R.ROUTINENAME = {}", string_literal(name)))
+        .unwrap_or_default();
     let sql = format!(
-        "SELECT ROUTINENAME, ROUTINETYPE, TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = {} ORDER BY ROUTINENAME WITH UR",
+        "SELECT R.SPECIFICNAME, R.ROUTINENAME, R.ROUTINETYPE, R.ORIGIN, R.LANGUAGE, \
+         P.ROWTYPE, P.ORDINAL, P.PARMNAME, P.TYPENAME, P.LENGTH, P.SCALE, P.CODEPAGE \
+         FROM SYSCAT.ROUTINES R \
+         LEFT JOIN SYSCAT.ROUTINEPARMS P \
+         ON P.ROUTINESCHEMA = R.ROUTINESCHEMA AND P.SPECIFICNAME = R.SPECIFICNAME \
+         WHERE R.ROUTINESCHEMA = {} AND R.ROUTINETYPE IN ('F', 'P') \
+         AND R.ROUTINEMODULENAME IS NULL{name_filter} \
+         ORDER BY R.SPECIFICNAME, P.ORDINAL, P.ROWTYPE WITH UR",
         string_literal(schema)
     );
     let result = session.query(&sql)?;
-    Ok(result
-        .rows
+
+    let mut routines: Vec<CatalogRoutine> = Vec::new();
+    for row in &result.rows {
+        let specific_name = cell(row, 0).unwrap_or_default();
+        let Some(routine_type) = routine_type(cell(row, 2).unwrap_or_default()) else {
+            continue;
+        };
+        if routines
+            .last()
+            .is_none_or(|routine| routine.specific_name != specific_name)
+        {
+            routines.push(CatalogRoutine {
+                specific_name: specific_name.to_string(),
+                name: cell(row, 1).unwrap_or_default().to_string(),
+                routine_type,
+                origin: cell(row, 3).unwrap_or_default().trim().to_string(),
+                language: cell(row, 4).unwrap_or_default().trim().to_string(),
+                parameters: Vec::new(),
+            });
+        }
+        // A routine without parameters has one row, with no parameter in it.
+        let ordinal = cell_i64(row, 6).unwrap_or(0);
+        let Some(role) = cell(row, 5).and_then(|row_type| parameter_role(row_type, ordinal)) else {
+            continue;
+        };
+        let Some(routine) = routines.last_mut() else {
+            continue;
+        };
+        // A function that casts its result has it twice: the cast one, which
+        // is what the caller gets, sorts first.
+        if role == ParameterRole::ReturnValue
+            && routine
+                .parameters
+                .iter()
+                .any(|parameter| parameter.role == ParameterRole::ReturnValue)
+        {
+            continue;
+        }
+        // Length 0 is how a function Db2 ships says "as long as the
+        // argument": the type is then given without a length.
+        let described = describe_catalog_type(
+            cell(row, 8).unwrap_or_default(),
+            cell_i64(row, 9).filter(|length| *length > 0),
+            cell_i64(row, 10),
+            cell_i64(row, 11),
+        );
+        // Parameter names are optional for external routines. Tabularis
+        // reads a parameter without a name as the return value, so an
+        // unnamed argument is shown by its position.
+        let name = match (role, non_empty(cell(row, 7))) {
+            (_, Some(name)) => name,
+            (ParameterRole::Argument(_), None) => format!("${ordinal}"),
+            (_, None) => String::new(),
+        };
+        routine.parameters.push(CatalogParameter {
+            role,
+            ordinal: ordinal as i32,
+            name,
+            data_type: described.full_type.unwrap_or(described.data_type),
+        });
+    }
+    routines.sort_by_cached_key(|routine| {
+        (
+            routine.name.clone(),
+            routine.routine_type,
+            routine.signature(),
+        )
+    });
+    Ok(routines)
+}
+
+/// The routine a request names. `identity_args` is the signature
+/// `get_routines` reported for it; without one the first routine of that
+/// name answers, which is the only one unless the name is overloaded.
+fn find_routine(
+    session: &Session,
+    schema: &str,
+    target: &RoutineTarget,
+) -> PluginResult<CatalogRoutine> {
+    catalog_routines(session, schema, Some(target.name))?
         .into_iter()
-        .map(|row| RoutineInfo {
-            name: cell(&row, 0).unwrap_or_default().to_string(),
-            routine_type: cell(&row, 1).unwrap_or("FUNCTION").to_string(),
-            definition: cell(&row, 2).map(ToString::to_string),
+        .find(|routine| {
+            target
+                .routine_type
+                .is_none_or(|wanted| wanted.eq_ignore_ascii_case(routine.routine_type))
+                && target
+                    .identity_args
+                    .is_none_or(|wanted| wanted == routine.signature())
+        })
+        .ok_or_else(|| {
+            let kind = match target.routine_type {
+                Some(wanted) if wanted.eq_ignore_ascii_case("PROCEDURE") => "Procedure",
+                Some(wanted) if wanted.eq_ignore_ascii_case("FUNCTION") => "Function",
+                _ => "Routine",
+            };
+            let name = quote_qualified_name(Some(schema), target.name);
+            match target.identity_args {
+                Some(arguments) => format!("{kind} {name}({arguments}) does not exist"),
+                None => format!("{kind} {name} does not exist"),
+            }
+        })
+}
+
+/// Which routine a request is about: its name, and what Tabularis sends
+/// along to tell it from the others of that name.
+pub struct RoutineTarget<'a> {
+    pub name: &'a str,
+    pub routine_type: Option<&'a str>,
+    pub identity_args: Option<&'a str>,
+}
+
+pub fn get_routines(session: &Session, schema: &str) -> PluginResult<Vec<RoutineInfo>> {
+    Ok(catalog_routines(session, schema, None)?
+        .into_iter()
+        .map(|routine| RoutineInfo {
+            identity_args: routine.signature(),
+            name: routine.name,
+            routine_type: routine.routine_type.to_string(),
+            definition: None,
         })
         .collect())
 }
 
+/// The arguments of a routine with their direction, then what it returns:
+/// the value of a scalar function (no name, position 0, as Tabularis
+/// expects a return value) or the columns of a table function, numbered
+/// after the arguments.
 pub fn get_routine_parameters(
     session: &Session,
     schema: &str,
-    routine_name: &str,
+    target: &RoutineTarget,
 ) -> PluginResult<Vec<RoutineParameter>> {
-    let sql = format!(
-        "SELECT PARMNAME, TYPENAME, ROWTYPE, ORDINAL FROM SYSCAT.ROUTINEPARMS \
-         WHERE ROUTINESCHEMA = {} AND ROUTINENAME = {} ORDER BY ORDINAL WITH UR",
-        string_literal(schema),
-        string_literal(routine_name)
-    );
-    let result = session.query(&sql)?;
-    Ok(result
-        .rows
+    let routine = find_routine(session, schema, target)?;
+    let argument_count = routine
+        .arguments()
+        .map(|parameter| parameter.ordinal)
+        .max()
+        .unwrap_or(0);
+    let mut parameters: Vec<RoutineParameter> = routine
+        .parameters
         .into_iter()
-        .map(|row| RoutineParameter {
-            name: cell(&row, 0).unwrap_or_default().to_string(),
-            data_type: cell(&row, 1).unwrap_or_default().to_string(),
-            mode: match cell(&row, 2).unwrap_or("P") {
-                "P" | "B" => "IN".to_string(),
-                "O" => "OUT".to_string(),
-                "I" => "INOUT".to_string(),
-                other => other.to_string(),
-            },
-            ordinal_position: cell(&row, 3)
-                .and_then(|value| value.parse::<i32>().ok())
-                .unwrap_or(0),
+        .map(|parameter| {
+            let (name, mode, ordinal_position) = match parameter.role {
+                ParameterRole::Argument(mode) => (parameter.name, mode, parameter.ordinal),
+                ParameterRole::ReturnValue => (String::new(), "OUT", 0),
+                ParameterRole::ResultColumn => {
+                    (parameter.name, "OUT", argument_count + parameter.ordinal)
+                }
+            };
+            RoutineParameter {
+                name,
+                data_type: parameter.data_type,
+                mode: mode.to_string(),
+                ordinal_position,
+            }
         })
-        .collect())
+        .collect();
+    parameters.sort_by_key(|parameter| parameter.ordinal_position);
+    Ok(parameters)
 }
 
+/// The `CREATE` statement of a routine, as it was run. Db2 keeps it for
+/// routines written in SQL only: an external routine is compiled code the
+/// catalog points to, and a built-in one has no statement at all.
 pub fn get_routine_definition(
     session: &Session,
     schema: &str,
-    routine_name: &str,
+    target: &RoutineTarget,
 ) -> PluginResult<String> {
+    let routine = find_routine(session, schema, target)?;
     let sql = format!(
-        "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = {} AND ROUTINENAME = {} FETCH FIRST 1 ROW ONLY WITH UR",
+        "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = {} AND SPECIFICNAME = {} WITH UR",
         string_literal(schema),
-        string_literal(routine_name)
+        string_literal(&routine.specific_name)
     );
-    let result = session.query(&sql)?;
-    Ok(result
+    let text = session
+        .query(&sql)?
         .rows
         .into_iter()
         .next()
         .and_then(|row| row.into_iter().next().flatten())
-        .unwrap_or_default())
+        .filter(|text| !text.trim().is_empty());
+    text.ok_or_else(|| {
+        let label = routine_label(
+            &quote_qualified_name(Some(schema), &routine.name),
+            &routine.signature(),
+        );
+        match routine.origin.as_str() {
+            "E" => format!(
+                "{label} is an external {} routine: Db2 keeps its compiled code, not its source",
+                routine.language
+            ),
+            "B" | "S" | "T" => format!("{label} is built into Db2: it has no definition"),
+            _ => format!("Db2 stores no definition for {label}"),
+        }
+    })
 }
 
 /// Column metadata for every table and view of a schema, keyed by table

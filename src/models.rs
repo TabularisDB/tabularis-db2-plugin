@@ -168,8 +168,15 @@ pub struct TableSchema {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoutineInfo {
     pub name: String,
+    /// `FUNCTION` or `PROCEDURE`.
     pub routine_type: String,
+    /// Left out of the list: Tabularis asks for the definition of the routine
+    /// it opens.
     pub definition: Option<String>,
+    /// The argument types of the routine. Db2 lets routines share a name, so
+    /// Tabularis shows this next to it and sends it back to say which one it
+    /// means. Empty for a routine without arguments.
+    pub identity_args: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

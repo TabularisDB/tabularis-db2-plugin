@@ -1425,40 +1425,309 @@ fn test_get_indexes_special_kinds() {
 // Tests — Routines
 // ---------------------------------------------------------------------------
 
+/// `NAME(signature)` of every routine `get_routines` lists, with its type.
+fn routine_entries(plugin: &mut Plugin, schema: &str) -> Vec<(String, String)> {
+    plugin
+        .call_ok("get_routines", plugin.params_in(schema, json!({})))
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .map(|routine| {
+            (
+                format!(
+                    "{}({})",
+                    routine["name"].as_str().expect("name"),
+                    routine["identity_args"].as_str().expect("identity_args")
+                ),
+                routine["routine_type"]
+                    .as_str()
+                    .expect("routine_type")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `MODE NAME TYPE @POSITION` of every parameter of a routine.
+fn parameter_summary(plugin: &mut Plugin, schema: &str, target: Value) -> Vec<String> {
+    plugin
+        .call_ok("get_routine_parameters", plugin.params_in(schema, target))
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{} {} {} @{}",
+                parameter["mode"].as_str().expect("mode"),
+                parameter["name"].as_str().expect("name"),
+                parameter["data_type"].as_str().expect("data_type"),
+                parameter["ordinal_position"]
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn test_get_routines() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok("get_routines", p.schema_params(json!({})));
-    let routines = result.as_array().expect("expected array");
-    let names: Vec<&str> = routines.iter().filter_map(|r| r["name"].as_str()).collect();
+    let routines = routine_entries(&mut p, "TEST_SCHEMA");
+    let expected = [
+        (
+            "ADJUST_BUDGET(INTEGER, DECIMAL(15,2), DECIMAL(15,2))",
+            "PROCEDURE",
+        ),
+        ("DEPT_EMPLOYEE_COUNT(INTEGER)", "FUNCTION"),
+        ("EMPLOYEES_OF_DEPT(INTEGER)", "FUNCTION"),
+        ("FIXTURE_VERSION()", "FUNCTION"),
+        ("FORMAT_AMOUNT(DECIMAL(10,2))", "FUNCTION"),
+        ("FORMAT_AMOUNT(DECIMAL(10,2), CHAR(3))", "FUNCTION"),
+        ("FULL_NAME(VARCHAR(50), VARCHAR(50))", "FUNCTION"),
+        ("GET_EMPLOYEES_BY_DEPT(INTEGER)", "PROCEDURE"),
+        (
+            "UPDATE_SALARY(INTEGER, DECIMAL(10,2), DECIMAL(10,2))",
+            "PROCEDURE",
+        ),
+    ];
+    for (label, routine_type) in expected {
+        assert!(
+            routines.contains(&(label.to_string(), routine_type.to_string())),
+            "{routine_type} {label} missing: {routines:?}"
+        );
+    }
+}
 
-    assert!(
-        names.contains(&"GET_EMPLOYEES_BY_DEPT"),
-        "procedure GET_EMPLOYEES_BY_DEPT missing: {names:?}"
+#[test]
+fn test_get_routines_reports_types_tabularis_groups_by() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The sidebar files a routine under Functions or Procedures by these two
+    // words; the catalog's own `F` and `P` would leave both groups empty.
+    for schema in ["TEST_SCHEMA", "SYSPROC", "SYSFUN"] {
+        let routines = routine_entries(&mut p, schema);
+        assert!(!routines.is_empty(), "{schema} has routines");
+        for (label, routine_type) in &routines {
+            assert!(
+                routine_type == "FUNCTION" || routine_type == "PROCEDURE",
+                "{schema}.{label} is a {routine_type}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_get_routines_leaves_definitions_out() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let result = p.call_ok("get_routines", p.schema_params(json!({})));
+    for routine in result.as_array().expect("expected array") {
+        assert!(routine["definition"].is_null(), "{routine}");
+    }
+}
+
+#[test]
+fn test_get_routines_empty_schema() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    assert!(routine_entries(&mut p, "EMPTY_SCHEMA").is_empty());
+}
+
+#[test]
+fn test_get_routine_parameters_directions_and_types() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({
+                "routine_name": "ADJUST_BUDGET",
+                "identity_args": "INTEGER, DECIMAL(15,2), DECIMAL(15,2)"
+            })
+        ),
+        [
+            "IN P_DEPT_ID INTEGER @1",
+            "OUT P_PREVIOUS DECIMAL(15,2) @2",
+            "INOUT P_AMOUNT DECIMAL(15,2) @3",
+        ]
     );
-    assert!(
-        names.contains(&"FULL_NAME"),
-        "function FULL_NAME missing: {names:?}"
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "UPDATE_SALARY" })
+        ),
+        [
+            "IN P_EMP_ID INTEGER @1",
+            "IN P_NEW_SALARY DECIMAL(10,2) @2",
+            "OUT P_OLD_SALARY DECIMAL(10,2) @3",
+        ]
     );
 }
 
 #[test]
-fn test_get_routine_parameters() {
+fn test_get_routine_parameters_function_return_value() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "get_routine_parameters",
-        p.schema_params(json!({ "routine_name": "UPDATE_SALARY" })),
+    // The value a function returns comes first, without a name: that is how
+    // Tabularis recognises it and labels it "Return value".
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FULL_NAME", "identity_args": "VARCHAR(50), VARCHAR(50)" })
+        ),
+        [
+            "OUT  VARCHAR(101) @0",
+            "IN P_FIRST_NAME VARCHAR(50) @1",
+            "IN P_LAST_NAME VARCHAR(50) @2",
+        ]
     );
-    let params = result.as_array().expect("expected array");
-    assert!(params.len() >= 3, "UPDATE_SALARY should have >= 3 params");
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FIXTURE_VERSION", "identity_args": "" })
+        ),
+        ["OUT  VARCHAR(10) @0"]
+    );
+}
 
-    let modes: Vec<&str> = params.iter().filter_map(|p| p["mode"].as_str()).collect();
-    assert!(modes.contains(&"IN"), "should have IN params");
-    assert!(modes.contains(&"OUT"), "should have OUT param");
+#[test]
+fn test_get_routine_parameters_table_function() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The columns of the returned table follow the arguments.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "EMPLOYEES_OF_DEPT", "identity_args": "INTEGER" })
+        ),
+        [
+            "IN P_DEPT_ID INTEGER @1",
+            "OUT EMP_ID INTEGER @2",
+            "OUT LAST_NAME VARCHAR(50) @3",
+        ]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_of_each_overload() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FORMAT_AMOUNT", "identity_args": "DECIMAL(10,2)" })
+        ),
+        ["OUT  VARCHAR(20) @0", "IN P_AMOUNT DECIMAL(10,2) @1"]
+    );
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FORMAT_AMOUNT", "identity_args": "DECIMAL(10,2), CHAR(3)" })
+        ),
+        [
+            "OUT  VARCHAR(24) @0",
+            "IN P_AMOUNT DECIMAL(10,2) @1",
+            "IN P_CURRENCY CHAR(3) @2",
+        ]
+    );
+    // Without a signature the first routine of that name answers: never a
+    // mix of the two.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine_name": "FORMAT_AMOUNT" })
+        ),
+        ["OUT  VARCHAR(20) @0", "IN P_AMOUNT DECIMAL(10,2) @1"]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_accepts_guide_parameter_name() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The plugin guide documents `routine`; Tabularis sends `routine_name`.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "TEST_SCHEMA",
+            json!({ "routine": "DEPT_EMPLOYEE_COUNT" })
+        ),
+        ["OUT  INTEGER @0", "IN P_DEPT_ID INTEGER @1"]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_of_system_routines() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // An external procedure Db2 ships, with parameters of both directions.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "SYSPROC",
+            json!({ "routine_name": "ADMIN_DROP_SCHEMA" })
+        ),
+        [
+            "IN SCHEMA VARCHAR(128) @1",
+            "IN DROPMODE VARCHAR(128) @2",
+            "INOUT ERRORTABSCHEMA VARCHAR(128) @3",
+            "INOUT ERRORTAB VARCHAR(128) @4",
+        ]
+    );
+    // A built-in function: its argument has no name in the catalog, and is
+    // shown by position rather than passed off as the return value.
+    assert_eq!(
+        parameter_summary(
+            &mut p,
+            "SYSIBM",
+            json!({ "routine_name": "ABS", "identity_args": "DECFLOAT(34)" })
+        ),
+        ["OUT  DECFLOAT(34) @0", "IN $1 DECFLOAT(34) @1"]
+    );
+}
+
+#[test]
+fn test_get_routine_parameters_unknown_routine() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let resp = p.call(
+        "get_routine_parameters",
+        p.schema_params(json!({ "routine_name": "NO_SUCH_ROUTINE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "Routine \"TEST_SCHEMA\".\"NO_SUCH_ROUTINE\" does not exist"
+    );
+
+    let resp = p.call(
+        "get_routine_parameters",
+        p.schema_params(json!({ "routine_name": "FORMAT_AMOUNT", "identity_args": "DATE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "Routine \"TEST_SCHEMA\".\"FORMAT_AMOUNT\"(DATE) does not exist"
+    );
+
+    let resp = p.call("get_routine_parameters", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
 }
 
 #[test]
@@ -1466,15 +1735,197 @@ fn test_get_routine_definition() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
+    let definition = p.call_ok(
         "get_routine_definition",
-        p.schema_params(json!({ "routine_name": "FULL_NAME" })),
+        p.schema_params(json!({
+            "routine_name": "FULL_NAME",
+            "routine_type": "FUNCTION",
+            "identity_args": "VARCHAR(50), VARCHAR(50)"
+        })),
     );
-    let def = result.as_str().expect("expected string");
-    let upper = def.to_uppercase();
+    let definition = definition.as_str().expect("expected string");
     assert!(
-        upper.contains("RETURN"),
-        "function definition should contain RETURN: {def}"
+        definition.starts_with("CREATE FUNCTION TEST_SCHEMA.FULL_NAME("),
+        "{definition}"
+    );
+    assert!(
+        definition.ends_with("RETURN p_first_name || ' ' || p_last_name;\nEND"),
+        "the whole statement, as it was written: {definition}"
+    );
+
+    let definition = p.call_ok(
+        "get_routine_definition",
+        p.schema_params(json!({
+            "routine_name": "UPDATE_SALARY",
+            "routine_type": "PROCEDURE",
+            "identity_args": "INTEGER, DECIMAL(10,2), DECIMAL(10,2)"
+        })),
+    );
+    let definition = definition.as_str().expect("expected string");
+    assert!(
+        definition.starts_with("CREATE PROCEDURE TEST_SCHEMA.UPDATE_SALARY("),
+        "{definition}"
+    );
+    assert!(
+        definition.contains("OUT p_old_salary DECIMAL(10, 2)"),
+        "{definition}"
+    );
+}
+
+#[test]
+fn test_get_routine_definition_of_each_overload() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let mut definition_of = |identity_args: &str| {
+        p.call_ok(
+            "get_routine_definition",
+            p.schema_params(json!({
+                "routine_name": "FORMAT_AMOUNT",
+                "routine_type": "FUNCTION",
+                "identity_args": identity_args
+            })),
+        )
+        .as_str()
+        .expect("expected string")
+        .to_string()
+    };
+
+    let one_argument = definition_of("DECIMAL(10,2)");
+    assert!(
+        one_argument.contains("RETURNS VARCHAR(20)"),
+        "{one_argument}"
+    );
+    assert!(!one_argument.contains("p_currency"), "{one_argument}");
+
+    let two_arguments = definition_of("DECIMAL(10,2), CHAR(3)");
+    assert!(
+        two_arguments.contains("RETURNS VARCHAR(24)"),
+        "{two_arguments}"
+    );
+    assert!(
+        two_arguments.contains("p_currency CHAR(3)"),
+        "{two_arguments}"
+    );
+}
+
+#[test]
+fn test_get_routine_definition_is_complete() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // A body far longer than one fetch buffer comes back whole.
+    let filler: String = (0..400)
+        .map(|line| format!("    -- line {line:03} of a long routine body, kept as written\n"))
+        .collect();
+    let statement = format!(
+        "CREATE OR REPLACE PROCEDURE TEST_SCHEMA.LONG_ROUTINE(OUT p_total INTEGER)\n\
+         LANGUAGE SQL\nBEGIN\n{filler}    SET p_total = 400;\nEND"
+    );
+    assert!(statement.len() > 20_000);
+    p.query_ok(&statement, Value::Null, 1);
+
+    let definition = p.call_ok(
+        "get_routine_definition",
+        p.schema_params(json!({
+            "routine_name": "LONG_ROUTINE",
+            "routine_type": "PROCEDURE",
+            "identity_args": "INTEGER"
+        })),
+    );
+    p.query_ok("DROP PROCEDURE TEST_SCHEMA.LONG_ROUTINE", Value::Null, 1);
+
+    assert_eq!(definition.as_str().expect("expected string"), statement);
+}
+
+#[test]
+fn test_get_routine_definition_tells_function_from_procedure() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Db2 keeps functions and procedures apart: the two can share a name
+    // and a signature, and `routine_type` is what says which one is meant.
+    p.query_ok(
+        "CREATE OR REPLACE FUNCTION TEST_SCHEMA.TWIN_ROUTINE(p_value INTEGER) \
+         RETURNS INTEGER LANGUAGE SQL RETURN p_value + 1",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "CREATE OR REPLACE PROCEDURE TEST_SCHEMA.TWIN_ROUTINE(INOUT p_value INTEGER) \
+         LANGUAGE SQL BEGIN SET p_value = p_value + 1; END",
+        Value::Null,
+        1,
+    );
+
+    let mut definition_of = |routine_type: &str| {
+        p.call_ok(
+            "get_routine_definition",
+            p.schema_params(json!({
+                "routine_name": "TWIN_ROUTINE",
+                "routine_type": routine_type,
+                "identity_args": "INTEGER"
+            })),
+        )
+        .as_str()
+        .expect("expected string")
+        .to_string()
+    };
+    let function = definition_of("FUNCTION");
+    let procedure = definition_of("PROCEDURE");
+
+    p.query_ok("DROP FUNCTION TEST_SCHEMA.TWIN_ROUTINE", Value::Null, 1);
+    p.query_ok("DROP PROCEDURE TEST_SCHEMA.TWIN_ROUTINE", Value::Null, 1);
+
+    assert!(
+        function.starts_with("CREATE OR REPLACE FUNCTION"),
+        "{function}"
+    );
+    assert!(
+        procedure.starts_with("CREATE OR REPLACE PROCEDURE"),
+        "{procedure}"
+    );
+}
+
+#[test]
+fn test_get_routine_definition_without_stored_source() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // An external routine is compiled code: there is no source to return,
+    // and the answer says so instead of opening an empty editor.
+    let resp = p.call(
+        "get_routine_definition",
+        p.params_in(
+            "SYSPROC",
+            json!({ "routine_name": "ADMIN_CMD", "routine_type": "PROCEDURE", "identity_args": "CLOB(2M)" }),
+        ),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "\"SYSPROC\".\"ADMIN_CMD\"(CLOB(2M)) is an external C routine: \
+         Db2 keeps its compiled code, not its source"
+    );
+
+    let resp = p.call(
+        "get_routine_definition",
+        p.params_in(
+            "SYSIBM",
+            json!({ "routine_name": "ABS", "routine_type": "FUNCTION", "identity_args": "DECFLOAT(34)" }),
+        ),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "\"SYSIBM\".\"ABS\"(DECFLOAT(34)) is built into Db2: it has no definition"
+    );
+
+    let resp = p.call(
+        "get_routine_definition",
+        p.schema_params(json!({ "routine_name": "FULL_NAME", "routine_type": "PROCEDURE" })),
+    );
+    assert_eq!(
+        resp["error"]["message"],
+        "Procedure \"TEST_SCHEMA\".\"FULL_NAME\" does not exist"
     );
 }
 
