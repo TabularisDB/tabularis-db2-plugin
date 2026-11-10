@@ -52,7 +52,7 @@ recreating the container.
 ## Architecture Rules
 
 - `src/main.rs` owns the JSON-RPC loop and dispatch. Handlers live in
-  `src/handlers/`, organized by domain (`metadata`, `query`, `crud`, `ddl`),
+  `src/handlers/`, organized by domain (`metadata`, `query`, `explain`, `crud`, `ddl`),
   and return `PluginResult<T>` (`Result<T, String>`).
 - Db2 access goes through `src/client.rs` (ODBC via `odbc-api`). A request
   opens one `Session` (one connection) and runs all of its statements on it;
@@ -81,6 +81,9 @@ recreating the container.
   state (a type or nullability change). Anything Db2 cannot do is an error
   from the builder, never SQL that will fail when run. Each builder has an
   integration test that runs its output on Db2.
+- `handlers::explain` tags each `EXPLAIN PLAN` with its own `QUERYTAG`,
+  reads only those rows and deletes them; `utils::explain` builds the tree
+  from the rows. Never read a plan by "latest `EXPLAIN_TIME`".
 - ODBC errors reach the user through `error::odbc_error`, which keeps the
   Db2 message and drops the ODBC call name and driver tags.
 - Pure helpers (identifier quoting, literals, pagination math, type

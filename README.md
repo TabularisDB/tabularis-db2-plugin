@@ -176,7 +176,7 @@ The code is intentionally split by responsibility:
 | `get_routine_definition` | Returns the `CREATE` statement of an SQL routine |
 | `execute_query` | Runs one statement. A result set (`SELECT`, `WITH`, `VALUES`, `CALL`) is paged on the cursor and returned with typed values; anything else returns the number of rows it changed |
 | `execute_query_batch` | Runs the statements of a script in order on one connection, reporting each one's result or error |
-| `explain_query` | Returns the DB2 execution plan tree by reading explain tables |
+| `explain_query` | Returns Db2's access plan as a tree: operators with their tables and indexes, estimated rows and costs, predicates and join types; with `analyze`, the statement also runs and its real row count and time are reported |
 | `insert_record` | Inserts a row, rendering each value for its column type (numbers validated, text and binary data bound as parameters, `NULL`, column defaults, BLOB uploads) |
 | `fetch_blob_as_data_url` / `save_blob_to_file` | Read the whole value of a binary column for the preview and for export |
 | `update_record` | Sets one column of one row, found by its primary key (single or composite) or, for a table without one, by the values of all its columns |
@@ -356,7 +356,8 @@ and publishes the release with that changelog section as its notes.
 ## Known Limitations
 
 - The plugin requires a working Db2 ODBC driver on the host system.
-- `explain_query` reads the DB2 explain tables (`SYSTOOLS.EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`, `EXPLAIN_STATEMENT`) to build a plan tree; these tables must exist (see `CALL SYSPROC.SYSINSTALLOBJECTS`). Some cost/row metrics depend on the DB2 edition and optimizer statistics being up to date.
+- `explain_query` writes the plan into the Db2 explain tables (the session user's own, else `SYSTOOLS`) and deletes it once read. When neither schema has them, they are created in `SYSTOOLS` with `SYSPROC.SYSINSTALLOBJECTS`, which needs the authority to create tables there. Costs and row estimates are the optimizer's, and depend on up-to-date statistics (`RUNSTATS`).
+- Analyze runs the statement (a data change is committed) and reports its real row count and elapsed time for the statement as a whole. Per-operator actuals would need an activity event monitor, which a client cannot assume it may create.
 - Catalog queries were designed using Db2 catalog conventions and DBeaver’s Db2 extension as a reference, but they should still be validated against the specific Db2 edition/version you target.
 - Every statement is committed on its own: connections run in autocommit mode and are not kept between requests, so an explicit transaction cannot span several statements run from the editor. Wrap the statements in a `BEGIN ... END` compound statement to run them atomically.
 - A `BLOB` in a query result carries its first 10,240 bytes and its full size; `BINARY`, `VARBINARY` and `FOR BIT DATA` values are shown as hexadecimal text.

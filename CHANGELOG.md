@@ -213,11 +213,34 @@ All notable changes to this project will be documented in this file.
   - `get_routine_definition` of a routine Db2 keeps no source for (external
     and built-in routines) says why, instead of opening an empty editor; an
     unknown routine is an error, not an empty definition.
+- `explain_query`, checked against Db2 12.1 and Tabularis 0.32.0:
+  - Tables and indexes are no longer drawn as operators named `Unknown`
+    with id `-1`. They are the `relation` of the operator that reads them,
+    and an index scan names its index and table.
+  - Each request now reads its own plan, under a `QUERYTAG` of its own. It
+    used to read whichever plan anyone on the database had explained last.
+    Its rows are deleted once read, so the explain tables no longer grow with
+    every click.
+  - Predicates are placed where Db2 applies them. Index ranges go to
+    `index_condition`, filters to `filter`, the join of a hash join to
+    `hash_condition`. Joins report their type (`Inner`, `Left`, `Right`), and
+    a join's outer input is listed first.
+  - Every operator argument Db2 records is kept: sort keys, prefetch, lock
+    intent and others. `planning_time_ms` is the compile time Db2 reports, and
+    a table scan of a table is marked as a full scan.
+  - Analyze used to set `has_analyze_data` without running anything. It now
+    runs the statement and reports the rows it returned or changed and its
+    elapsed time.
+  - A statement that cannot be explained fails with Db2's error for the
+    statement as written, not one quoting the `EXPLAIN` around it. A
+    statement with no access plan, such as DDL, says so.
 - `SQL0668N` with reason code 7 (table in "reorg pending" state) now comes
   with the `REORG TABLE` statement that fixes it.
 
 ### Added
 
+- The `explain` capability: Tabularis shows Visual EXPLAIN for Db2
+  connections.
 - `create_view`, `alter_view` and `drop_view`. The manifest declares
   `views`, so Tabularis offers "Create New View", "Edit View" and "Drop
   View"; all three answered "Method not implemented". `alter_view` keeps

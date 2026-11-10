@@ -1,5 +1,6 @@
 pub mod binding;
 pub mod blob;
+pub mod explain;
 pub mod identifiers;
 pub mod pagination;
 pub mod routines;

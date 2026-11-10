@@ -35,6 +35,7 @@
     "schemas": true,
     "views": true,
     "routines": true,
+    "explain": true,
     "file_based": false,
     "folder_based": false,
     "connection_string": true,

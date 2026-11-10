@@ -147,6 +147,31 @@ pub struct ExplainNode {
     pub children: Vec<ExplainNode>,
 }
 
+impl ExplainNode {
+    /// A node with nothing known about it yet.
+    pub fn new(id: impl Into<String>, node_type: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            node_type: node_type.into(),
+            relation: None,
+            startup_cost: None,
+            total_cost: None,
+            plan_rows: None,
+            actual_rows: None,
+            actual_time_ms: None,
+            actual_loops: None,
+            buffers_hit: None,
+            buffers_read: None,
+            filter: None,
+            index_condition: None,
+            join_type: None,
+            hash_condition: None,
+            extra: HashMap::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExplainPlan {
     pub root: ExplainNode,

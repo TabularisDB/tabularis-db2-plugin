@@ -7,7 +7,7 @@ mod utils;
 
 use client::Session;
 use error::PluginResult;
-use handlers::{crud, ddl, metadata, query};
+use handlers::{crud, ddl, explain, metadata, query};
 use models::{ColumnDefinition, ConnectionParams, PluginSettings};
 use rpc::{RpcError, RpcResult};
 use serde::Serialize;
@@ -305,9 +305,10 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             )))
         }
         "explain_query" => {
-            let (session, _) = request.schema_session()?;
-            reply(query::explain_query(
+            let (session, schema) = request.schema_session()?;
+            reply(explain::explain_query(
                 &session,
+                &schema,
                 request.text(&["query"]).unwrap_or_default(),
                 request
                     .params
