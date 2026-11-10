@@ -245,33 +245,96 @@ pub fn get_columns(
     Ok(result.rows.iter().map(|row| column_from_row(row)).collect())
 }
 
+/// Foreign key list shared by `get_foreign_keys` and
+/// `get_all_foreign_keys_batch`: one row per column of each constraint, the
+/// table name first so the batch can group on it.
+///
+/// A constraint's columns are paired with the parent key's columns by their
+/// position in the key (`COLSEQ`), which is what makes a composite foreign
+/// key come out as `(A, B) -> (X, Y)` rather than every combination.
+const FOREIGN_KEY_SELECT: &str =
+    "SELECT R.TABNAME, R.CONSTNAME, FK.COLNAME, R.REFTABNAME, PK.COLNAME, R.DELETERULE, \
+            R.UPDATERULE, FK.COLSEQ \
+     FROM SYSCAT.REFERENCES R \
+     JOIN SYSCAT.KEYCOLUSE FK ON FK.CONSTNAME = R.CONSTNAME AND FK.TABSCHEMA = R.TABSCHEMA \
+          AND FK.TABNAME = R.TABNAME \
+     JOIN SYSCAT.KEYCOLUSE PK ON PK.CONSTNAME = R.REFKEYNAME AND PK.TABSCHEMA = R.REFTABSCHEMA \
+          AND PK.TABNAME = R.REFTABNAME AND PK.COLSEQ = FK.COLSEQ";
+
+/// Spells out the one-letter referential action of `SYSCAT.REFERENCES`.
+fn referential_rule(code: Option<&str>) -> Option<String> {
+    let rule = match code.map(str::trim) {
+        Some("A") => "NO ACTION",
+        Some("C") => "CASCADE",
+        Some("N") => "SET NULL",
+        Some("R") => "RESTRICT",
+        Some(other) if !other.is_empty() => other,
+        _ => return None,
+    };
+    Some(rule.to_string())
+}
+
+fn foreign_key_from_row(row: &[Option<String>]) -> ForeignKey {
+    ForeignKey {
+        name: cell(row, 1).unwrap_or_default().to_string(),
+        column_name: cell(row, 2).unwrap_or_default().to_string(),
+        ref_table: cell(row, 3).unwrap_or_default().to_string(),
+        ref_column: cell(row, 4).unwrap_or_default().to_string(),
+        on_delete: referential_rule(cell(row, 5)),
+        on_update: referential_rule(cell(row, 6)),
+        seq_in_fk: cell_i64(row, 7).map(|position| position as i32),
+    }
+}
+
+/// Lists the foreign keys of a table: one entry per column, the columns of
+/// a composite key sharing the constraint name and numbered by `seq_in_fk`.
 pub fn get_foreign_keys(
     session: &Session,
     schema: &str,
     table_name: &str,
 ) -> PluginResult<Vec<ForeignKey>> {
     let sql = format!(
-        "SELECT R.CONSTNAME, FK.COLNAME, R.REFTABNAME, PK.COLNAME, R.DELETERULE, R.UPDATERULE \
-         FROM SYSCAT.REFERENCES R \
-         JOIN SYSCAT.KEYCOLUSE FK ON FK.CONSTNAME = R.CONSTNAME AND FK.TABSCHEMA = R.TABSCHEMA AND FK.TABNAME = R.TABNAME \
-         JOIN SYSCAT.KEYCOLUSE PK ON PK.CONSTNAME = R.REFKEYNAME AND PK.TABSCHEMA = R.REFTABSCHEMA AND PK.TABNAME = R.REFTABNAME AND PK.COLSEQ = FK.COLSEQ \
-         WHERE R.TABSCHEMA = {} AND R.TABNAME = {} ORDER BY R.CONSTNAME, FK.COLSEQ WITH UR",
+        "{FOREIGN_KEY_SELECT} WHERE R.TABSCHEMA = {} AND R.TABNAME = {} \
+         ORDER BY R.CONSTNAME, FK.COLSEQ WITH UR",
         string_literal(schema),
         string_literal(table_name)
     );
     let result = session.query(&sql)?;
     Ok(result
         .rows
-        .into_iter()
-        .map(|row| ForeignKey {
-            name: cell(&row, 0).unwrap_or_default().to_string(),
-            column_name: cell(&row, 1).unwrap_or_default().to_string(),
-            ref_table: cell(&row, 2).unwrap_or_default().to_string(),
-            ref_column: cell(&row, 3).unwrap_or_default().to_string(),
-            on_delete: cell(&row, 4).map(ToString::to_string),
-            on_update: cell(&row, 5).map(ToString::to_string),
-        })
+        .iter()
+        .map(|row| foreign_key_from_row(row))
         .collect())
+}
+
+/// Drops a foreign key of a table. A constraint that is not a foreign key
+/// of that table is reported by name; Db2's own message for it only says
+/// that the bare name is undefined.
+pub fn drop_foreign_key(
+    session: &Session,
+    schema: &str,
+    table_name: &str,
+    constraint_name: &str,
+) -> PluginResult<()> {
+    let target = quote_qualified_name(Some(schema), table_name);
+    let exists = session.query(&format!(
+        "SELECT 1 FROM SYSCAT.REFERENCES \
+         WHERE TABSCHEMA = {} AND TABNAME = {} AND CONSTNAME = {} WITH UR",
+        string_literal(schema),
+        string_literal(table_name),
+        string_literal(constraint_name)
+    ))?;
+    if exists.rows.is_empty() {
+        return Err(format!(
+            "Foreign key {} was not found on table {target}",
+            quote_identifier(constraint_name)
+        ));
+    }
+    let sql = format!(
+        "ALTER TABLE {target} DROP FOREIGN KEY {}",
+        quote_identifier(constraint_name)
+    );
+    session.execute(&sql).map(|_| ())
 }
 
 /// Lists the indexes of a table, one entry per key column in key order.
@@ -438,17 +501,16 @@ pub fn get_all_columns_batch(
     Ok(map)
 }
 
+/// Foreign keys of every table of a schema, keyed by table name. `tables`
+/// narrows the result to the named tables when given.
 pub fn get_all_foreign_keys_batch(
     session: &Session,
     schema: &str,
     tables: Option<&[String]>,
 ) -> PluginResult<HashMap<String, Vec<ForeignKey>>> {
     let sql = format!(
-        "SELECT R.TABNAME, R.CONSTNAME, FK.COLNAME, R.REFTABNAME, PK.COLNAME, R.DELETERULE, R.UPDATERULE \
-         FROM SYSCAT.REFERENCES R \
-         JOIN SYSCAT.KEYCOLUSE FK ON FK.CONSTNAME = R.CONSTNAME AND FK.TABSCHEMA = R.TABSCHEMA AND FK.TABNAME = R.TABNAME \
-         JOIN SYSCAT.KEYCOLUSE PK ON PK.CONSTNAME = R.REFKEYNAME AND PK.TABSCHEMA = R.REFTABSCHEMA AND PK.TABNAME = R.REFTABNAME AND PK.COLSEQ = FK.COLSEQ \
-         WHERE R.TABSCHEMA = {} ORDER BY R.TABNAME, R.CONSTNAME, FK.COLSEQ WITH UR",
+        "{FOREIGN_KEY_SELECT} WHERE R.TABSCHEMA = {} \
+         ORDER BY R.TABNAME, R.CONSTNAME, FK.COLSEQ WITH UR",
         string_literal(schema)
     );
     let result = session.query(&sql)?;
@@ -460,14 +522,7 @@ pub fn get_all_foreign_keys_batch(
         }
         map.entry(table_name.to_string())
             .or_default()
-            .push(ForeignKey {
-                name: cell(row, 1).unwrap_or_default().to_string(),
-                column_name: cell(row, 2).unwrap_or_default().to_string(),
-                ref_table: cell(row, 3).unwrap_or_default().to_string(),
-                ref_column: cell(row, 4).unwrap_or_default().to_string(),
-                on_delete: cell(row, 5).map(ToString::to_string),
-                on_update: cell(row, 6).map(ToString::to_string),
-            });
+            .push(foreign_key_from_row(row));
     }
     Ok(map)
 }

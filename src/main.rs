@@ -418,12 +418,15 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         }
         "drop_foreign_key" => {
             let (session, schema) = request.schema_session()?;
-            let sql = ddl::drop_foreign_key_sql(
-                request.required(&["table"])?,
-                request.required(&["fk_name", "constraint_name"])?,
-                Some(&schema),
-            );
-            reply(session.execute(&sql).map(|_| Value::Null))
+            reply(
+                metadata::drop_foreign_key(
+                    &session,
+                    &schema,
+                    request.required(&["table"])?,
+                    request.required(&["fk_name", "constraint_name"])?,
+                )
+                .map(|()| Value::Null),
+            )
         }
 
         _ => Err(RpcError::method_not_found(method)),
