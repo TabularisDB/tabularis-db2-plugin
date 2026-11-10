@@ -406,12 +406,15 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         // -- DDL execution ---------------------------------------------------
         "drop_index" => {
             let (session, schema) = request.schema_session()?;
-            let sql = ddl::drop_index_sql(
-                request.text(&["table"]).unwrap_or_default(),
-                request.required(&["index_name"])?,
-                Some(&schema),
-            );
-            reply(session.execute(&sql).map(|_| Value::Null))
+            reply(
+                metadata::drop_index(
+                    &session,
+                    &schema,
+                    request.required(&["table"])?,
+                    request.required(&["index_name"])?,
+                )
+                .map(|()| Value::Null),
+            )
         }
         "drop_foreign_key" => {
             let (session, schema) = request.schema_session()?;

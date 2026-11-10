@@ -69,7 +69,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Delete record | Verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
 | DDL generation | Verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
 | View support | Verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
-| Index management | Not yet verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
+| Index management | Verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
 | Foreign key management | Not yet verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
 | Routine support | Not yet verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
 | Explain query | Verified | [#11](https://github.com/TabularisDB/tabularis-db2-plugin/issues/11) |
@@ -166,7 +166,7 @@ The code is intentionally split by responsibility:
 | `get_tables` | Lists the tables of the selected schema: base, typed, materialized query and created temporary tables, and nicknames |
 | `get_columns` | Returns column metadata for a table or view: type with length/precision/scale, nullability, key, identity, generated flag, default and comment |
 | `get_foreign_keys` | Lists foreign keys for a table |
-| `get_indexes` | Lists indexes for a table |
+| `get_indexes` | Lists the indexes of a table, one entry per key column: uniqueness, primary key, position, and the expression of an expression-based index |
 | `get_views` | Lists views in the selected schema |
 | `get_view_definition` | Returns the view's query: the stored `CREATE VIEW` text without its header |
 | `get_view_columns` | Returns column metadata for a view |
@@ -190,7 +190,7 @@ The code is intentionally split by responsibility:
 | `get_create_index_sql` | Generates `CREATE [UNIQUE] INDEX` in the table's schema |
 | `get_create_foreign_key_sql` | Generates `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY`; referential actions Db2 does not have (`ON UPDATE CASCADE`) are refused |
 | `get_table_ddl` | Rebuilds the `CREATE TABLE` of an existing table from the catalog, with its indexes and comments, for table export and database dumps |
-| `drop_index` | Executes `DROP INDEX` |
+| `drop_index` | Drops an index of the table, in whichever schema the index lives |
 | `drop_foreign_key` | Executes `ALTER TABLE ... DROP FOREIGN KEY` |
 
 ## Building from Source

@@ -168,6 +168,17 @@ All notable changes to this project will be documented in this file.
   - A definition longer than 4,096 bytes is returned whole.
   - `get_view_definition` reports a view that does not exist instead of
     returning an empty definition.
+- Index management, verified against Db2 12.1 and Tabularis 0.32.0 (#8):
+  - `drop_index` looks up the schema the index lives in. It assumed the
+    table's schema and wrote it unquoted, so an index created in another
+    schema, or in a schema with a delimited name, could not be dropped.
+  - An index that is not on the table is refused with `Index "X" was not
+    found on table "S"."T"` instead of dropping an index of the same name
+    that belongs to another table.
+  - `get_indexes` reports the expression of an expression-based index
+    (`UPPER(LAST_NAME)`) instead of the column name Db2 generates for it
+    (`K00`), marked `is_expression`, and leaves out `INCLUDE` columns,
+    which are not part of the key.
 - `SQL0668N` with reason code 7 (table in "reorg pending" state) now comes
   with the `REORG TABLE` statement that fixes it.
 

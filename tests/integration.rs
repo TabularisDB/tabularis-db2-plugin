@@ -1076,41 +1076,166 @@ fn test_get_all_foreign_keys_batch() {
     );
 }
 
+/// `[name, column, unique, primary, position, expression]` of each index
+/// entry of a table in TEST_SCHEMA.
+fn index_entries(p: &mut Plugin, table: &str) -> Vec<Value> {
+    p.call_ok("get_indexes", p.schema_params(json!({ "table": table })))
+        .as_array()
+        .expect("expected array")
+        .iter()
+        .map(|index| {
+            json!([
+                index["name"],
+                index["column_name"],
+                index["is_unique"],
+                index["is_primary"],
+                index["seq_in_index"],
+                index["is_expression"]
+            ])
+        })
+        .collect()
+}
+
 #[test]
 fn test_get_indexes() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "get_indexes",
-        p.schema_params(json!({ "table": "EMPLOYEES" })),
-    );
-    let indexes = result.as_array().expect("expected array");
-    let names: Vec<&str> = indexes.iter().filter_map(|i| i["name"].as_str()).collect();
-
-    assert!(
-        names.iter().any(|n| n.contains("IDX_EMP_EMAIL")),
-        "IDX_EMP_EMAIL not found in: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.contains("IDX_EMP_LAST_NAME")),
-        "IDX_EMP_LAST_NAME not found in: {names:?}"
-    );
-
-    // Check unique flag on email index
-    let email_idx = indexes
-        .iter()
-        .find(|i| {
-            i["name"]
-                .as_str()
-                .map(|n| n.contains("IDX_EMP_EMAIL"))
-                .unwrap_or(false)
-        })
-        .expect("email index missing");
+    // Unique, non-unique and the primary key's index, each with its column.
+    let entries = index_entries(&mut p, "EMPLOYEES");
+    assert_eq!(entries.len(), 3, "{entries:?}");
     assert_eq!(
-        email_idx["is_unique"],
-        json!(true),
-        "email index should be unique"
+        entries[0],
+        json!(["IDX_EMP_EMAIL", "EMAIL", true, false, 1, false])
+    );
+    assert_eq!(
+        entries[1],
+        json!(["IDX_EMP_LAST_NAME", "LAST_NAME", false, false, 1, false])
+    );
+    // Db2 names the primary key's index itself (SQL<timestamp>).
+    assert!(
+        entries[2][0].as_str().unwrap().starts_with("SQL"),
+        "{entries:?}"
+    );
+    assert_eq!(
+        entries[2].as_array().unwrap()[1..],
+        json!(["EMP_ID", true, true, 1, false]).as_array().unwrap()[..]
+    );
+
+    // A composite index: one entry per column, in key order.
+    let entries = index_entries(&mut p, "PROJECTS");
+    assert_eq!(
+        entries[0],
+        json!(["IDX_PROJ_STATUS", "STATUS", false, false, 1, false])
+    );
+    assert_eq!(
+        entries[1],
+        json!(["IDX_PROJ_STATUS", "START_DATE", false, false, 2, false])
+    );
+
+    // A composite primary key.
+    let entries = index_entries(&mut p, "EMP_PROJECTS");
+    let primary: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| entry[3] == json!(true))
+        .collect();
+    assert_eq!(primary.len(), 2);
+    assert_eq!(primary[0][1], json!("EMP_ID"));
+    assert_eq!(primary[0][4], json!(1));
+    assert_eq!(primary[1][1], json!("PROJECT_ID"));
+    assert_eq!(primary[1][4], json!(2));
+
+    // A table without indexes, a table that does not exist, and a view.
+    assert_eq!(index_entries(&mut p, "KEYLESS_TEST"), Vec::<Value>::new());
+    assert_eq!(index_entries(&mut p, "NOPE"), Vec::<Value>::new());
+    assert_eq!(index_entries(&mut p, "V_EMP_DETAILS"), Vec::<Value>::new());
+    let resp = p.call("get_indexes", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    // Delimited names.
+    let mixed = p.call_ok(
+        "get_indexes",
+        p.params_in("Mixed Case", json!({ "table": "Order Details" })),
+    );
+    assert_eq!(mixed.as_array().unwrap().len(), 1);
+    assert_eq!(mixed[0]["column_name"], json!("Order Id"));
+    assert_eq!(mixed[0]["is_primary"], json!(true));
+}
+
+#[test]
+fn test_get_indexes_special_kinds() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+    for index in [
+        "TEST_SCHEMA.IDX_T_EXPR",
+        "TEST_SCHEMA.IDX_T_INCL",
+        "\"Mixed Case\".\"Idx Elsewhere\"",
+    ] {
+        p.query(&format!("DROP INDEX {index}"), Value::Null, 1);
+    }
+    // An index on an expression with a descending column, a unique index
+    // that carries an extra column, and an index kept in another schema.
+    p.query_ok(
+        "CREATE INDEX TEST_SCHEMA.IDX_T_EXPR ON TEST_SCHEMA.DEPARTMENTS (UPPER(DEPT_NAME), BUDGET DESC)",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "CREATE UNIQUE INDEX TEST_SCHEMA.IDX_T_INCL ON TEST_SCHEMA.DEPARTMENTS (DEPT_NAME) INCLUDE (LOCATION)",
+        Value::Null,
+        1,
+    );
+    p.query_ok(
+        "CREATE INDEX \"Mixed Case\".\"Idx Elsewhere\" ON TEST_SCHEMA.DEPARTMENTS (CREATED_AT)",
+        Value::Null,
+        1,
+    );
+
+    let entries = index_entries(&mut p, "DEPARTMENTS");
+    let named = |name: &str| -> Vec<&Value> {
+        entries
+            .iter()
+            .filter(|entry| entry[0] == json!(name))
+            .collect()
+    };
+    // The expression is reported, not the name Db2 generates for it (K00).
+    assert_eq!(
+        named("IDX_T_EXPR"),
+        [
+            &json!(["IDX_T_EXPR", "UPPER(DEPT_NAME)", false, false, 1, true]),
+            &json!(["IDX_T_EXPR", "BUDGET", false, false, 2, false]),
+        ]
+    );
+    // The INCLUDE column is carried by the index but is not part of its key.
+    assert_eq!(
+        named("IDX_T_INCL"),
+        [&json!(["IDX_T_INCL", "DEPT_NAME", true, false, 1, false])]
+    );
+    assert_eq!(
+        named("Idx Elsewhere"),
+        [&json!([
+            "Idx Elsewhere",
+            "CREATED_AT",
+            false,
+            false,
+            1,
+            false
+        ])]
+    );
+
+    // drop_index finds each one, whichever schema it lives in.
+    for index in ["IDX_T_EXPR", "IDX_T_INCL", "Idx Elsewhere"] {
+        let dropped = p.call_ok(
+            "drop_index",
+            p.schema_params(json!({ "table": "DEPARTMENTS", "index_name": index })),
+        );
+        assert_eq!(dropped, Value::Null, "{index}");
+    }
+    let left = index_entries(&mut p, "DEPARTMENTS");
+    assert_eq!(
+        left.len(),
+        1,
+        "only the primary key's index is left: {left:?}"
     );
 }
 
@@ -3730,30 +3855,72 @@ fn test_delete_record_errors() {
 fn test_drop_index() {
     require_db2!();
     let mut p = Plugin::spawn();
+    p.query("DROP INDEX TEST_SCHEMA.IDX_T_DROP", Value::Null, 1);
+    p.query_ok(
+        "CREATE INDEX TEST_SCHEMA.IDX_T_DROP ON TEST_SCHEMA.DROP_TEST (NAME, PARENT_ID)",
+        Value::Null,
+        1,
+    );
+    let has_index = |p: &mut Plugin| {
+        index_entries(p, "DROP_TEST")
+            .iter()
+            .any(|entry| entry[0] == json!("IDX_T_DROP"))
+    };
+    assert!(has_index(&mut p));
+    let drop = |p: &mut Plugin, table: &str, index: &str| {
+        p.call(
+            "drop_index",
+            p.schema_params(json!({ "table": table, "index_name": index })),
+        )
+    };
 
-    // Drop the test index
+    // An index of another table is not dropped by mistake.
+    let resp = drop(&mut p, "EMPLOYEES", "IDX_T_DROP");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Index \"IDX_T_DROP\" was not found on table \"TEST_SCHEMA\".\"EMPLOYEES\"")
+    );
+    assert!(has_index(&mut p));
+
+    // Dropped, and gone from the list.
+    let resp = drop(&mut p, "DROP_TEST", "IDX_T_DROP");
+    assert_eq!(resp["result"], Value::Null, "{resp}");
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert!(!has_index(&mut p));
+
+    // An index that does not exist (any more).
+    let resp = drop(&mut p, "DROP_TEST", "IDX_T_DROP");
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Index \"IDX_T_DROP\" was not found on table \"TEST_SCHEMA\".\"DROP_TEST\"")
+    );
+    let resp = drop(&mut p, "NOPE_TABLE", "IDX_T_DROP");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not found"),
+        "{resp}"
+    );
     let resp = p.call(
         "drop_index",
-        p.schema_params(json!({
-            "table": "DROP_TEST",
-            "index_name": "IDX_DROP_TEST_NAME"
-        })),
-    );
-    assert!(resp.get("result").is_some(), "drop_index failed: {resp}");
-
-    // Verify index is gone
-    let result = p.call_ok(
-        "get_indexes",
         p.schema_params(json!({ "table": "DROP_TEST" })),
     );
-    let indexes = result.as_array().unwrap();
-    let has_idx = indexes.iter().any(|i| {
-        i["name"]
-            .as_str()
-            .map(|n| n.contains("IDX_DROP_TEST_NAME"))
-            .unwrap_or(false)
-    });
-    assert!(!has_idx, "index should have been dropped");
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    // The index behind a primary key cannot be dropped on its own.
+    let primary = index_entries(&mut p, "DROP_TEST")
+        .into_iter()
+        .find(|entry| entry[3] == json!(true))
+        .expect("primary key index");
+    let resp = drop(&mut p, "DROP_TEST", primary[0].as_str().unwrap());
+    assert_eq!(
+        resp["error"]["message"],
+        json!("SQL0669N A system required index cannot be dropped explicitly. SQLSTATE=42917")
+    );
+    assert!(index_entries(&mut p, "DROP_TEST")
+        .iter()
+        .any(|entry| entry[3] == json!(true)));
 }
 
 #[test]
