@@ -17,7 +17,7 @@ path = "src/bin/test_plugin.rs"
 [dependencies]
 base64 = "0.23.1"
 infer = "0.22"
-odbc-api = "24"
+odbc-api = "29"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 
