@@ -1,0 +1,410 @@
+DB2 Universal Database Version 12.1, 5622-044 (c) Copyright IBM Corp. 1991, 2024
+Licensed Material - Program Property of IBM
+IBM Db2 Explain Table Format Tool
+
+
+
+******************** EXPLAIN INSTANCE ********************
+
+DB2_VERSION:       12.01.5
+FORMATTED ON DB:   TESTDB
+SOURCE_NAME:       SQLC2Q32
+SOURCE_SCHEMA:     NULLID  
+SOURCE_VERSION:      
+EXPLAIN_TIME:      2026-11-10-08.14.45.731346
+EXPLAIN_REQUESTER: DB2INST1
+
+Database Context:
+----------------
+	Parallelism:          None
+	CPU Speed:            9.446887e-08
+	Comm Speed:           100
+	Buffer Pool size:     5000
+	Sort Heap size:       256
+	Database Heap size:   4842
+	Lock List size:       13978
+	Maximum Lock List:    98
+	Average Applications: 1
+	Locks Available:      438350
+
+Package Context:
+---------------
+	SQL Type:           Dynamic
+	Optimization Level: 5
+	Blocking:           Block All Cursors
+	Isolation Level:    Cursor Stability
+
+
+
+---------------- STATEMENT 1  SECTION 203 ----------------
+	QUERYNO:       1
+	QUERYTAG:      T3INDEX             
+	Statement Type:   Select
+	Updatable:        No
+	Deletable:        No
+	Query Degree:     1
+
+Original Statement:
+------------------
+SELECT 
+  * 
+FROM 
+  TEST_SCHEMA.EMPLOYEES 
+WHERE 
+  EMP_ID = 2
+
+
+Optimized Statement:
+-------------------
+SELECT 
+  2 AS "EMP_ID",
+  Q1.FIRST_NAME AS "FIRST_NAME",
+  Q1.LAST_NAME AS "LAST_NAME",
+  Q1.EMAIL AS "EMAIL",
+  Q1.HIRE_DATE AS "HIRE_DATE",
+  Q1.SALARY AS "SALARY",
+  Q1.IS_ACTIVE AS "IS_ACTIVE",
+  Q1.DEPT_ID AS "DEPT_ID",
+  Q1.NOTES AS "NOTES" 
+FROM 
+  TEST_SCHEMA.EMPLOYEES AS Q1 
+WHERE 
+  (Q1.EMP_ID = 2)
+
+Access Plan:
+-----------
+	Total Cost: 		6.77031
+	Query Degree:		1
+
+	Assisted by the AI Query Optimizer
+
+
+                Rows 
+               RETURN
+               (   1)
+                Cost 
+                 I/O 
+                 |
+                  1 
+               FETCH 
+               (   2)
+               6.77031 
+                  1 
+           /-----+-----\
+          1               6 
+       IXSCAN    TABLE: TEST_SCHEMA
+       (   3)         EMPLOYEES
+     0.00391479          Q1
+          0 
+         |
+          6 
+   INDEX: SYSIBM  
+ SQL261110050754890
+         Q1
+
+
+
+Extended Diagnostic Information:
+--------------------------------
+
+No extended Diagnostic Information for this statement.
+
+
+Plan Details:
+-------------
+
+
+	1) RETURN: (Return Result)
+		Cumulative Total Cost: 		6.77031
+		Cumulative CPU Cost: 		56260
+		Cumulative I/O Cost: 		1
+		Cumulative Re-Total Cost: 	0.000736763
+		Cumulative Re-CPU Cost: 	7799
+		Cumulative Re-I/O Cost: 	0
+		Cumulative First Row Cost: 	6.77023
+		Estimated Bufferpool Buffers: 	2
+
+		Arguments:
+		---------
+		BLDLEVEL: (Build level)
+			DB2 v12.1.5.0 : special_85816
+		CPUCACHE: (Per-thread CPU cache size)
+			1048576
+		HEAPUSE : (Maximum Statement Heap Usage)
+			96 Pages
+		MAX CARD: (Maximum Cardinality)
+			1
+		PLANID  : (Access plan identifier)
+			788f06748a986fa9
+		PREPTIME: (Statement prepare time)
+			         7 milliseconds
+		SEMEVID : (Semantic environment identifier)
+			0000000000000001
+		STMTHEAP: (Statement heap size)
+			8192
+		STMTID  : (Normalized statement identifier)
+			d0d23bf0a3f4f031
+		TENANTID: (Compiled In Tenant ID)
+			0
+		TENANTNM: (Compiled In Tenant Name)
+			SYSTEM
+
+		Input Streams:
+		-------------
+			4) From Operator #2
+
+				Estimated number of rows: 	1
+				Number of columns: 		9
+				Subquery predicate ID: 		Not Applicable
+
+				Column Names:
+				------------
+				+Q2.NOTES+Q2.DEPT_ID+Q2.IS_ACTIVE+Q2.SALARY
+				+Q2.HIRE_DATE+Q2.EMAIL+Q2.LAST_NAME
+				+Q2.FIRST_NAME+Q2.EMP_ID
+
+
+	2) FETCH : (Fetch)
+		Cumulative Total Cost: 		6.77031
+		Cumulative CPU Cost: 		56260
+		Cumulative I/O Cost: 		1
+		Cumulative Re-Total Cost: 	0.000736763
+		Cumulative Re-CPU Cost: 	7799
+		Cumulative Re-I/O Cost: 	0
+		Cumulative First Row Cost: 	6.77023
+		Estimated Bufferpool Buffers: 	2
+
+		Arguments:
+		---------
+		CUR_COMM: (Currently Committed)
+			TRUE
+		LCKAVOID: (Lock Avoidance)
+			TRUE
+		MAX CARD: (Maximum Cardinality)
+			1
+		MAXPAGES: (Maximum pages for prefetch)
+			ALL
+		PREFETCH: (Type of Prefetch)
+			NONE                
+		ROWLOCK : (Row Lock intent)
+			SHARE (CS/RS)
+		SKIP_INS: (Skip Inserted Rows)
+			TRUE
+		SPEED   : (Assumed speed of scan, in sharing structures)
+			SLOW
+		TABLOCK : (Table Lock intent)
+			INTENT SHARE
+		TBISOLVL: (Table access Isolation Level)
+			CURSOR STABILITY
+		THROTTLE: (Scan may be throttled, for scan sharing)
+			FALSE
+		VISIBLE : (May be included in scan sharing structures)
+			FALSE
+		WRAPPING: (Scan may start anywhere and wrap)
+			FALSE
+
+		Input Streams:
+		-------------
+			2) From Operator #3
+
+				Estimated number of rows: 	1
+				Number of columns: 		1
+				Subquery predicate ID: 		Not Applicable
+
+				Column Names:
+				------------
+				+Q1.$RID$
+
+			3) From Object TEST_SCHEMA.EMPLOYEES
+
+				Estimated number of rows: 	6
+				Number of columns: 		8
+				Subquery predicate ID: 		Not Applicable
+
+				Column Names:
+				------------
+				+Q1.NOTES+Q1.DEPT_ID+Q1.IS_ACTIVE+Q1.SALARY
+				+Q1.HIRE_DATE+Q1.EMAIL+Q1.LAST_NAME
+				+Q1.FIRST_NAME
+
+
+		Output Streams:
+		--------------
+			4) To Operator #1
+
+				Estimated number of rows: 	1
+				Number of columns: 		9
+				Subquery predicate ID: 		Not Applicable
+
+				Column Names:
+				------------
+				+Q2.NOTES+Q2.DEPT_ID+Q2.IS_ACTIVE+Q2.SALARY
+				+Q2.HIRE_DATE+Q2.EMAIL+Q2.LAST_NAME
+				+Q2.FIRST_NAME+Q2.EMP_ID
+
+
+	3) IXSCAN: (Index Scan)
+		Cumulative Total Cost: 		0.00391479
+		Cumulative CPU Cost: 		41440
+		Cumulative I/O Cost: 		0
+		Cumulative Re-Total Cost: 	0.000564829
+		Cumulative Re-CPU Cost: 	5979
+		Cumulative Re-I/O Cost: 	0
+		Cumulative First Row Cost: 	0.00391479
+		Estimated Bufferpool Buffers: 	1
+
+		Arguments:
+		---------
+		CUR_COMM: (Currently Committed)
+			TRUE
+		LCKAVOID: (Lock Avoidance)
+			TRUE
+		MAX CARD: (Maximum Cardinality)
+			1
+		MAXPAGES: (Maximum pages for prefetch)
+			ALL
+		PREFETCH: (Type of Prefetch)
+			NONE                
+		ROWLOCK : (Row Lock intent)
+			SHARE (CS/RS)
+		SCANDIR : (Scan Direction)
+			FORWARD
+		SKIP_INS: (Skip Inserted Rows)
+			TRUE
+		TABLOCK : (Table Lock intent)
+			INTENT SHARE
+		TBISOLVL: (Table access Isolation Level)
+			CURSOR STABILITY
+
+		Predicates:
+		----------
+		2) Start Key Predicate, 
+			Comparison Operator: 		Equal (=)
+			Subquery Input Required: 	No
+			Filter Factor: 			0.166667
+
+			Predicate Text:
+			--------------
+			(Q1.EMP_ID = 2)
+
+
+		2) Stop Key Predicate, 
+			Comparison Operator: 		Equal (=)
+			Subquery Input Required: 	No
+			Filter Factor: 			0.166667
+
+			Predicate Text:
+			--------------
+			(Q1.EMP_ID = 2)
+
+
+
+		Table Cardinality Model Predicates:
+		-----------------------------------
+		Model: 	SYSIBM.SQL261110051202179638
+		Predicates:
+			2) (Q1.EMP_ID = 2)
+
+		Input Streams:
+		-------------
+			1) From Object SYSIBM.SQL261110050754890
+
+				Estimated number of rows: 	6
+				Number of columns: 		2
+				Subquery predicate ID: 		Not Applicable
+
+				Column Names:
+				------------
+				+Q1.$RID$+Q1.EMP_ID
+
+
+		Output Streams:
+		--------------
+			2) To Operator #2
+
+				Estimated number of rows: 	1
+				Number of columns: 		1
+				Subquery predicate ID: 		Not Applicable
+
+				Column Names:
+				------------
+				+Q1.$RID$
+
+
+Objects Used in Access Plan:
+---------------------------
+
+	Schema:   SYSIBM  
+	Name:     SQL261110050754890
+	Type:     Index
+			Time of creation: 		2026-11-10-05.07.54.736377
+			Last statistics update: 	2026-11-10-06.06.54.836583
+			Number of columns: 		1
+			Number of rows: 		6
+			Width of rows: 			-1
+			Number of buffer pool pages: 	1
+			Distinct row values: 		Yes
+			Tablespace name: 		USERSPACE1
+			Tablespace overhead: 		6.725000
+			Tablespace transfer rate: 	0.040000
+			Source for statistics: 		Single Node
+			Prefetch page count: 		32
+			Container extent page count: 	32
+			Index clustering statistic: 	100.000000
+			Index leaf pages: 		1
+			Index tree levels: 		1
+			Index full key cardinality: 	6
+			Index first key cardinality: 	6
+			Index first 2 keys cardinality: -1
+			Index first 3 keys cardinality: -1
+			Index first 4 keys cardinality: -1
+			Index sequential pages: 	0
+			Index page density: 		0
+			Index avg sequential pages: 	0
+			Index avg gap between sequences:0
+			Index avg random pages: 	1
+			Fetch avg sequential pages: 	-1
+			Fetch avg gap between sequences:-1
+			Fetch avg random pages: 	-1
+			Index RID count: 		7
+			Index deleted RID count: 	1
+			Index empty leaf pages: 	0
+			Base Table Schema: 		TEST_SCHEMA
+			Base Table Name: 		EMPLOYEES
+			Columns in index:
+				EMP_ID(A)
+			Null keys: 			Yes
+
+	Schema:   TEST_SCHEMA
+	Name:     EMPLOYEES
+	Type:     Table
+			Time of creation: 		2026-11-10-05.07.54.736377
+			Last statistics update: 	2026-11-10-06.06.54.836583
+			Number of columns: 		9
+			Number of rows: 		6
+			Width of rows: 			79
+			Number of buffer pool pages: 	1
+			Number of data partitions: 	1
+			Distinct row values: 		No
+			Tablespace name: 		USERSPACE1
+			Tablespace overhead: 		6.725000
+			Tablespace transfer rate: 	0.040000
+			Source for statistics: 		Single Node
+			Prefetch page count: 		32
+			Container extent page count: 	32
+			Table overflow record count: 	0
+			Table Active Blocks: 		-1
+			Average Row Compression Ratio: 	0
+			Percentage Rows Compressed: 	0
+			Average Compressed Row Size: 	0
+			Model Schema: 			SYSIBM
+			Model Name: 			SQL261110051202179638
+			Columns in model:
+				DEPT_ID
+				EMAIL
+				EMP_ID
+				FIRST_NAME
+				HIRE_DATE
+				LAST_NAME
+				SALARY
+

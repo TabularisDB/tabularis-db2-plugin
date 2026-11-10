@@ -2,7 +2,7 @@
   "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
   "id": "db2",
   "name": "Db2",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "IBM Db2 driver for Tabularis over ODBC: browse schemas, tables, views and routines, edit rows with type-aware binding, generate DDL for tables, columns, indexes and foreign keys, and draw Visual EXPLAIN plans from Db2's explain tables.",
   "category": "database",
   "tags": [

@@ -255,3 +255,31 @@ describe("parseDb2Explain", () => {
     expect(plan.raw_output).toMatch(/ {10}7 IXSCAN on EMPLOYEES using SYSIBM\.SQL\d+ /);
   });
 });
+
+
+describe("db2exfmt reports", () => {
+  it("rejects a report with missing operator details", async () => {
+    const report = await readFile(new URL("./fixtures/db2exfmt-scan.txt", import.meta.url), "utf8");
+    expect(() => parseDb2Explain(report.replace(/\n\s*2\) TBSCAN:[\s\S]*/, ""))).toThrow(/incomplete/);
+  });
+  it("parses a Db2 12.1 table scan report", async () => {
+    const report = await readFile(new URL("./fixtures/db2exfmt-scan.txt", import.meta.url), "utf8");
+    const plan = parseDb2Explain(report);
+    expect(plan.root.node_type).toBe("RETURN");
+    expect(plan.root.children[0].node_type).toBe("TBSCAN");
+    expect(plan.root.children[0].relation).toBe("TEST_SCHEMA.EMPLOYEES");
+    expect(plan.raw_output).toBe(report);
+  });
+  it("maps an index scan to its base table and key predicate", async () => {
+    const report = await readFile(new URL("./fixtures/db2exfmt-index.txt", import.meta.url), "utf8");
+    const node = flatten(parseDb2Explain(report).root).find(n => n.node_type === "IXSCAN")!;
+    expect(node.relation).toBe("TEST_SCHEMA.EMPLOYEES");
+    expect(node.index_condition).toContain("EMP_ID");
+  });
+  it("preserves the branches and predicates of a captured join", async () => {
+    const report = await readFile(new URL("./fixtures/db2exfmt-join.txt", import.meta.url), "utf8");
+    const plan = parseDb2Explain(report);
+    expect(plan.root.children[0].children).toHaveLength(2);
+    expect(JSON.stringify(plan.root)).toContain("DEPT_ID");
+  });
+});

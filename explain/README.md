@@ -10,6 +10,9 @@ tables for one statement (`EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`,
 plan reads) and, with Analyze, the row count and elapsed time of the run.
 `src/payload.ts` describes it; the plugin's `src/models.rs` produces it.
 
+The parser also accepts single-statement `db2exfmt` reports with operator
+details. It rejects reports with missing operator details or multiple statements.
+
 ## npm usage
 
 ```bash

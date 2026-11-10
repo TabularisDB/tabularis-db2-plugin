@@ -13,5 +13,5 @@ export const db2ExplainParser: RegisteredExplainParser = {
   format: "db2-explain-tables-json",
   label: "Db2 explain tables",
   parse: parseDb2Explain,
-  sniff: looksLikeDb2Payload,
+  sniff: (payload) => looksLikeDb2Payload(payload) || /Explain Table Format Tool/i.test(payload.slice(0, 1024)) && /^Plan Details:\s*$/m.test(payload),
 };

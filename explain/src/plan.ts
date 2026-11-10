@@ -7,6 +7,7 @@
  * and `EXPLAIN_ARGUMENT` the settings of each operator.
  */
 
+import { readDb2exfmt } from "./db2exfmt";
 import type { ExplainNode, ExplainPlan } from "@tabularis/explain";
 
 import {
@@ -269,7 +270,8 @@ export function planText(root: ExplainNode): string {
  * the operators below keep their estimates.
  */
 export function parseDb2Explain(rawPayload: string): ExplainPlan {
-  const payload = readPayload(rawPayload);
+  const textReport = !/^\s*\{/.test(rawPayload) && /Explain Table Format Tool/i.test(rawPayload);
+  const payload = textReport ? readDb2exfmt(rawPayload) : readPayload(rawPayload);
   const root = buildPlanTree(payload);
   if (root === null) {
     throw new Error("Db2 EXPLAIN payload has no operator to start the plan from");
@@ -286,6 +288,6 @@ export function parseDb2Explain(rawPayload: string): ExplainPlan {
     original_query: "",
     driver: "db2",
     has_analyze_data: payload.analyze !== null,
-    raw_output: planText(root),
+    raw_output: textReport ? rawPayload : planText(root),
   };
 }
