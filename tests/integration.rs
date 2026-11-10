@@ -1033,29 +1033,151 @@ fn test_create_alter_drop_view() {
 // Tests — Foreign keys & Indexes
 // ---------------------------------------------------------------------------
 
+/// `[name, column, ref table, ref column, on delete, on update, position]`
+/// of each foreign key entry.
+fn foreign_key_entries(keys: &Value) -> Vec<Value> {
+    keys.as_array()
+        .expect("expected array")
+        .iter()
+        .map(|key| {
+            json!([
+                key["name"],
+                key["column_name"],
+                key["ref_table"],
+                key["ref_column"],
+                key["on_delete"],
+                key["on_update"],
+                key["seq_in_fk"]
+            ])
+        })
+        .collect()
+}
+
+fn foreign_keys_of(p: &mut Plugin, table: &str) -> Vec<Value> {
+    let keys = p.call_ok(
+        "get_foreign_keys",
+        p.schema_params(json!({ "table": table })),
+    );
+    foreign_key_entries(&keys)
+}
+
 #[test]
 fn test_get_foreign_keys() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "get_foreign_keys",
-        p.schema_params(json!({ "table": "EMPLOYEES" })),
+    // One foreign key per rule Db2 has for deletes, spelled out.
+    assert_eq!(
+        foreign_keys_of(&mut p, "EMPLOYEES"),
+        [json!([
+            "FK_EMP_DEPT",
+            "DEPT_ID",
+            "DEPARTMENTS",
+            "DEPT_ID",
+            "SET NULL",
+            "NO ACTION",
+            1
+        ])]
     );
-    let fks = result.as_array().expect("expected array");
+    assert_eq!(
+        foreign_keys_of(&mut p, "PROJECTS"),
+        [json!([
+            "FK_PROJ_DEPT",
+            "DEPT_ID",
+            "DEPARTMENTS",
+            "DEPT_ID",
+            "CASCADE",
+            "NO ACTION",
+            1
+        ])]
+    );
+    assert_eq!(
+        foreign_keys_of(&mut p, "FK_CHILD"),
+        [json!([
+            "FK_CHILD_PARENT",
+            "PARENT_ID",
+            "FK_PARENT",
+            "ID",
+            "RESTRICT",
+            "NO ACTION",
+            1
+        ])]
+    );
+    assert_eq!(
+        foreign_keys_of(&mut p, "DROP_TEST"),
+        [json!([
+            "FK_DROP_TEST",
+            "PARENT_ID",
+            "DROP_TEST_PARENT",
+            "ID",
+            "NO ACTION",
+            "NO ACTION",
+            1
+        ])]
+    );
 
-    let fk = fks
-        .iter()
-        .find(|f| {
-            f["name"]
-                .as_str()
-                .map(|n| n.contains("FK_EMP_DEPT"))
-                .unwrap_or(false)
-        })
-        .expect("FK_EMP_DEPT not found");
+    // Two foreign keys on one table, sorted by name.
+    assert_eq!(
+        foreign_keys_of(&mut p, "EMP_PROJECTS"),
+        [
+            json!([
+                "FK_EP_EMP",
+                "EMP_ID",
+                "EMPLOYEES",
+                "EMP_ID",
+                "CASCADE",
+                "NO ACTION",
+                1
+            ]),
+            json!([
+                "FK_EP_PROJ",
+                "PROJECT_ID",
+                "PROJECTS",
+                "PROJECT_ID",
+                "CASCADE",
+                "NO ACTION",
+                1
+            ]),
+        ]
+    );
 
-    assert_eq!(fk["column_name"].as_str().unwrap().trim(), "DEPT_ID");
-    assert_eq!(fk["ref_table"].as_str().unwrap().trim(), "DEPARTMENTS");
+    // A composite foreign key: one entry per column, each paired with the
+    // parent column at the same position, plus the rule on updates.
+    assert_eq!(
+        foreign_keys_of(&mut p, "COMPOSITE_CHILD"),
+        [
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_REGION",
+                "COMPOSITE_PARENT",
+                "REGION",
+                "CASCADE",
+                "RESTRICT",
+                1
+            ]),
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_CODE",
+                "COMPOSITE_PARENT",
+                "CODE",
+                "CASCADE",
+                "RESTRICT",
+                2
+            ]),
+        ]
+    );
+
+    // A table that is only referenced, one without any, one that does not
+    // exist, and a view.
+    for table in ["DEPARTMENTS", "KEYLESS_TEST", "NOPE", "V_EMP_DETAILS"] {
+        assert_eq!(
+            foreign_keys_of(&mut p, table),
+            Vec::<Value>::new(),
+            "{table}"
+        );
+    }
+    let resp = p.call("get_foreign_keys", p.schema_params(json!({})));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
 }
 
 #[test]
@@ -1063,17 +1185,77 @@ fn test_get_all_foreign_keys_batch() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok("get_all_foreign_keys_batch", p.schema_params(json!({})));
-    let map = result.as_object().expect("expected object");
+    let batch = p.call_ok("get_all_foreign_keys_batch", p.schema_params(json!({})));
+    let map = batch.as_object().expect("expected object");
 
-    assert!(
-        map.contains_key("EMPLOYEES"),
-        "batch should include EMPLOYEES FK"
+    // Exactly the tables that have foreign keys.
+    let mut tables: Vec<&String> = map.keys().collect();
+    tables.sort();
+    assert_eq!(
+        tables,
+        [
+            "COMPOSITE_CHILD",
+            "DROP_TEST",
+            "EMPLOYEES",
+            "EMP_PROJECTS",
+            "FK_CHILD",
+            "PROJECTS"
+        ]
     );
-    assert!(
-        map.contains_key("EMP_PROJECTS"),
-        "batch should include EMP_PROJECTS FKs"
+
+    // For each of them, what get_foreign_keys returns.
+    for table in &tables {
+        let single = p.call_ok(
+            "get_foreign_keys",
+            p.schema_params(json!({ "table": table })),
+        );
+        assert_eq!(map[table.as_str()], single, "{table}");
+    }
+    assert_eq!(
+        foreign_key_entries(&map["COMPOSITE_CHILD"]),
+        [
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_REGION",
+                "COMPOSITE_PARENT",
+                "REGION",
+                "CASCADE",
+                "RESTRICT",
+                1
+            ]),
+            json!([
+                "FK_COMPOSITE",
+                "PARENT_CODE",
+                "COMPOSITE_PARENT",
+                "CODE",
+                "CASCADE",
+                "RESTRICT",
+                2
+            ]),
+        ]
     );
+
+    // `tables` narrows the batch; a table without foreign keys has no entry.
+    let batch = p.call_ok(
+        "get_all_foreign_keys_batch",
+        p.schema_params(json!({ "tables": ["EMPLOYEES", "DEPARTMENTS", "NOPE"] })),
+    );
+    let keys: Vec<&String> = batch.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["EMPLOYEES"]);
+
+    // A schema without foreign keys.
+    for schema in ["EMPTY_SCHEMA", "Mixed Case"] {
+        let batch = p.call_ok("get_all_foreign_keys_batch", p.params_in(schema, json!({})));
+        assert_eq!(batch, json!({}), "{schema}");
+    }
+
+    // The schema snapshot carries the same foreign keys.
+    let snapshot = p.call_ok("get_schema_snapshot", p.schema_params(json!({})));
+    for table in snapshot.as_array().unwrap() {
+        let name = table["name"].as_str().unwrap();
+        let expected = map.get(name).cloned().unwrap_or_else(|| json!([]));
+        assert_eq!(table["foreign_keys"], expected, "{name}");
+    }
 }
 
 /// `[name, column, unique, primary, position, expression]` of each index
@@ -3927,33 +4109,104 @@ fn test_drop_index() {
 fn test_drop_foreign_key() {
     require_db2!();
     let mut p = Plugin::spawn();
-
-    // Drop the test FK
-    let resp = p.call(
-        "drop_foreign_key",
-        p.schema_params(json!({
-            "table": "DROP_TEST",
-            "fk_name": "FK_DROP_TEST"
-        })),
+    // A table of its own, with two foreign keys on different columns (Db2
+    // ignores a second constraint on the same columns as a duplicate).
+    p.query("DROP TABLE TEST_SCHEMA.FK_TMP_CHILD", Value::Null, 1);
+    p.query_ok(
+        "CREATE TABLE TEST_SCHEMA.FK_TMP_CHILD (A INTEGER, B INTEGER, \
+         CONSTRAINT FK_T_DROP FOREIGN KEY (A) REFERENCES TEST_SCHEMA.FK_PARENT (ID) ON DELETE CASCADE, \
+         CONSTRAINT \"FK \"\"odd\"\" name\" FOREIGN KEY (B) REFERENCES TEST_SCHEMA.DROP_TEST_PARENT (ID))",
+        Value::Null,
+        1,
     );
+    let names = |p: &mut Plugin| -> Vec<String> {
+        foreign_keys_of(p, "FK_TMP_CHILD")
+            .iter()
+            .map(|key| key[0].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names(&mut p), ["FK \"odd\" name", "FK_T_DROP"]);
+    let drop = |p: &mut Plugin, table: &str, args: Value| {
+        let mut params = json!({ "table": table });
+        for (key, value) in args.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        p.call("drop_foreign_key", p.schema_params(params))
+    };
+
+    // While the constraint exists it is enforced.
+    let orphan = p.query(
+        "INSERT INTO TEST_SCHEMA.FK_TMP_CHILD (A) VALUES (999)",
+        Value::Null,
+        1,
+    );
+    assert!(orphan["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("SQL0530N"));
+
+    // A foreign key of another table is not this table's to drop.
+    let resp = drop(&mut p, "EMPLOYEES", json!({ "fk_name": "FK_T_DROP" }));
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Foreign key \"FK_T_DROP\" was not found on table \"TEST_SCHEMA\".\"EMPLOYEES\"")
+    );
+    assert_eq!(names(&mut p).len(), 2);
+
+    // Dropped, by the argument name Tabularis sends and by the documented
+    // one, with a name that needs quoting.
+    let resp = drop(&mut p, "FK_TMP_CHILD", json!({ "fk_name": "FK_T_DROP" }));
+    assert_eq!(resp["result"], Value::Null, "{resp}");
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(names(&mut p), ["FK \"odd\" name"]);
+    let resp = drop(
+        &mut p,
+        "FK_TMP_CHILD",
+        json!({ "constraint_name": "FK \"odd\" name" }),
+    );
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(names(&mut p), Vec::<String>::new());
+
+    // The constraint no longer restricts anything.
+    p.query_ok(
+        "INSERT INTO TEST_SCHEMA.FK_TMP_CHILD (A) VALUES (999)",
+        Value::Null,
+        1,
+    );
+
+    // A foreign key that does not exist (any more), a missing table and a
+    // missing argument.
+    let resp = drop(&mut p, "FK_TMP_CHILD", json!({ "fk_name": "FK_T_DROP" }));
+    assert_eq!(
+        resp["error"]["message"],
+        json!("Foreign key \"FK_T_DROP\" was not found on table \"TEST_SCHEMA\".\"FK_TMP_CHILD\"")
+    );
+    let resp = drop(&mut p, "NOPE_TABLE", json!({ "fk_name": "FK_T_DROP" }));
     assert!(
-        resp.get("result").is_some(),
-        "drop_foreign_key failed: {resp}"
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not found"),
+        "{resp}"
+    );
+    let resp = drop(&mut p, "FK_TMP_CHILD", json!({}));
+    assert_eq!(resp["error"]["code"], json!(-32602), "{resp}");
+
+    // A primary key is a constraint but not a foreign key.
+    let primary = index_entries(&mut p, "FK_PARENT")[0][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = drop(&mut p, "FK_PARENT", json!({ "fk_name": primary }));
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Foreign key"),
+        "{resp}"
     );
 
-    // Verify FK is gone
-    let result = p.call_ok(
-        "get_foreign_keys",
-        p.schema_params(json!({ "table": "DROP_TEST" })),
-    );
-    let fks = result.as_array().unwrap();
-    let has_fk = fks.iter().any(|f| {
-        f["name"]
-            .as_str()
-            .map(|n| n.contains("FK_DROP_TEST"))
-            .unwrap_or(false)
-    });
-    assert!(!has_fk, "FK should have been dropped");
+    p.query_ok("DROP TABLE TEST_SCHEMA.FK_TMP_CHILD", Value::Null, 1);
 }
 
 // ---------------------------------------------------------------------------

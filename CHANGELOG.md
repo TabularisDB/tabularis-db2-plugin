@@ -179,6 +179,19 @@ All notable changes to this project will be documented in this file.
     (`UPPER(LAST_NAME)`) instead of the column name Db2 generates for it
     (`K00`), marked `is_expression`, and leaves out `INCLUDE` columns,
     which are not part of the key.
+- Foreign key management, verified against Db2 12.1 and Tabularis 0.32.0
+  (#9):
+  - `get_foreign_keys`, `get_all_foreign_keys_batch` and
+    `get_schema_snapshot` spell out the referential actions (`CASCADE`,
+    `SET NULL`, `RESTRICT`, `NO ACTION`). They returned the catalog's
+    one-letter codes (`C`, `N`, `R`, `A`), which Tabularis showed as they
+    were.
+  - Each entry carries `seq_in_fk`, the column's position in its
+    constraint, so a composite foreign key is shown and regenerated with
+    its columns in key order.
+  - `drop_foreign_key` reports `Foreign key "X" was not found on table
+    "S"."T"` for a constraint that is not a foreign key of that table. Db2's
+    own message only said that the bare name is undefined.
 - `SQL0668N` with reason code 7 (table in "reorg pending" state) now comes
   with the `REORG TABLE` statement that fixes it.
 

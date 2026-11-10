@@ -79,6 +79,10 @@ pub struct ForeignKey {
     pub ref_column: String,
     pub on_delete: Option<String>,
     pub on_update: Option<String>,
+    /// 1-based position of this column within its constraint, so Tabularis
+    /// can put the columns of a composite foreign key back in order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq_in_fk: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

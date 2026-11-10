@@ -343,14 +343,6 @@ pub fn get_create_foreign_key_sql(
     Ok(vec![sql])
 }
 
-pub fn drop_foreign_key_sql(table: &str, fk_name: &str, schema: Option<&str>) -> String {
-    format!(
-        "ALTER TABLE {} DROP FOREIGN KEY {}",
-        quote_qualified_name(schema, table),
-        quote_identifier(fk_name)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,13 +670,5 @@ mod tests {
         for rule in ["NO ACTION", "RESTRICT", "CASCADE", "SET NULL"] {
             assert!(build(Some(rule), None).is_ok(), "{rule}");
         }
-    }
-
-    #[test]
-    fn drops_a_foreign_key_with_quoted_names() {
-        assert_eq!(
-            drop_foreign_key_sql("Order Details", "FK \"x\"", Some("APP")),
-            format!("ALTER TABLE {T} DROP FOREIGN KEY \"FK \"\"x\"\"\"")
-        );
     }
 }
