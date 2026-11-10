@@ -192,6 +192,27 @@ All notable changes to this project will be documented in this file.
   - `drop_foreign_key` reports `Foreign key "X" was not found on table
     "S"."T"` for a constraint that is not a foreign key of that table. Db2's
     own message only said that the bare name is undefined.
+- Routine support, verified against Db2 12.1 and Tabularis 0.32.0 (#10):
+  - `get_routines` reports `FUNCTION` and `PROCEDURE`. It returned the
+    catalog's `F` and `P`, so Tabularis filed every routine under neither
+    Functions nor Procedures.
+  - Routines of one name are told apart: each entry carries
+    `identity_args`, its argument types (`DECIMAL(10,2), CHAR(3)`), which
+    Tabularis shows next to the name and sends back. `get_routine_parameters`
+    and `get_routine_definition` answer for that routine; they used to mix
+    the parameters of every overload and return the first definition.
+    `routine_type` keeps a function and a procedure of the same name apart.
+  - Parameters have the right direction: `INOUT` parameters were reported as
+    `IN`, and the `B` row type was never mapped. Types carry their length,
+    precision and scale (`DECIMAL(15,2)`, not `DECIMAL`).
+  - A function's return value is listed first, without a name, as Tabularis
+    expects; a table function lists the columns it returns after its
+    arguments. Neither was told apart from an argument before.
+  - Routines of a module are no longer listed: they are not called by
+    schema and name.
+  - `get_routine_definition` of a routine Db2 keeps no source for (external
+    and built-in routines) says why, instead of opening an empty editor; an
+    unknown routine is an error, not an empty definition.
 - `SQL0668N` with reason code 7 (table in "reorg pending" state) now comes
   with the `REORG TABLE` statement that fixes it.
 

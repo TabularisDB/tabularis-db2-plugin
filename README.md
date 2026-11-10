@@ -71,7 +71,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | View support | Verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
 | Index management | Verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
 | Foreign key management | Verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
-| Routine support | Not yet verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
+| Routine support | Verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
 | Explain query | Verified | [#11](https://github.com/TabularisDB/tabularis-db2-plugin/issues/11) |
 
 ## Features
@@ -171,9 +171,9 @@ The code is intentionally split by responsibility:
 | `get_view_definition` | Returns the view's query: the stored `CREATE VIEW` text without its header |
 | `get_view_columns` | Returns column metadata for a view |
 | `create_view` / `alter_view` / `drop_view` | Create a view from a query, replace its query (`CREATE OR REPLACE VIEW`, keeping an explicit column list) and drop it |
-| `get_routines` | Lists routines in the selected schema |
-| `get_routine_parameters` | Returns routine parameters |
-| `get_routine_definition` | Returns the stored routine body when available |
+| `get_routines` | Lists functions and procedures, with the argument types that tell overloads apart |
+| `get_routine_parameters` | Returns a routine's parameters with their direction, its return value or returned columns |
+| `get_routine_definition` | Returns the `CREATE` statement of an SQL routine |
 | `execute_query` | Runs one statement. A result set (`SELECT`, `WITH`, `VALUES`, `CALL`) is paged on the cursor and returned with typed values; anything else returns the number of rows it changed |
 | `execute_query_batch` | Runs the statements of a script in order on one connection, reporting each one's result or error |
 | `explain_query` | Returns the DB2 execution plan tree by reading explain tables |
@@ -365,6 +365,7 @@ and publishes the release with that changelog section as its notes.
 - Db2 only supports `NO ACTION` and `RESTRICT` for `ON UPDATE`, and has no `SET DEFAULT` referential action; the foreign key editor reports that instead of generating SQL that cannot run.
 - A dump or export keeps identity columns as they are defined. Restoring rows into a `GENERATED ALWAYS` identity column fails (`SQL0798N`), as Db2 does not accept explicit values there; foreign keys are not part of the generated `CREATE TABLE`.
 - Db2 has no `JSON` column type (JSON is stored in `CLOB`, `VARCHAR` or `BLOB` columns), so it is not offered when creating a column.
+- Routines are read-only: they are listed, described and opened, but creating, running or dropping one goes through the SQL editor. External and built-in routines have no stored source, so only SQL routines can be opened.
 - `get_databases` is intentionally conservative and currently returns the active server/database identity instead of enumerating every possible database on an instance.
 
 ## [Changelog](./CHANGELOG.md)
