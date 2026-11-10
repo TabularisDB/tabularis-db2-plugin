@@ -36,6 +36,11 @@ pub fn clean_odbc_message(raw: &str) -> String {
         }
     }
 
+    if let Some(hint) = reorg_hint(&message) {
+        message.push(' ');
+        message.push_str(&hint);
+    }
+
     if is_missing_driver(&message) {
         message.push_str(
             " Check that the IBM Db2 ODBC driver is installed and that the plugin's \
@@ -60,6 +65,22 @@ fn strip_component_tags(message: &str) -> &str {
 
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What to do about SQL0668N with reason code 7: the table is in "reorg
+/// pending" state, which is where an `ALTER TABLE` that drops a column or
+/// changes a column's type or nullability leaves it. Db2 says the operation
+/// is not allowed and names the table; the fix is one statement away.
+fn reorg_hint(message: &str) -> Option<String> {
+    if !message.starts_with("SQL0668N") || !message.contains("reason code \"7\"") {
+        return None;
+    }
+    let table = message.split("on table \"").nth(1)?.split('"').next()?;
+    let (schema, name) = table.split_once('.')?;
+    Some(format!(
+        "The table must be reorganized after the last ALTER TABLE: run CALL \
+         SYSPROC.ADMIN_CMD('REORG TABLE \"{schema}\".\"{name}\"')."
+    ))
 }
 
 fn is_missing_driver(message: &str) -> bool {
@@ -110,6 +131,24 @@ mod tests {
                    Message: [unixODBC][Driver Manager]Data source name not found and no default \
                    driver specified";
         assert!(clean_odbc_message(raw).contains("ODBC Driver Name"));
+    }
+
+    #[test]
+    fn says_how_to_leave_reorg_pending_state() {
+        let raw =
+            "ODBC emitted an error calling 'SQLExecDirect':\nState: 57016, Native error: -668, \
+                   Message: [IBM][CLI Driver][DB2/LINUXX8664] SQL0668N  Operation not allowed for \
+                   reason code \"7\" on table \"TEST_SCHEMA.DDL_PROBE\".  SQLSTATE=57007";
+        assert_eq!(
+            clean_odbc_message(raw),
+            "SQL0668N Operation not allowed for reason code \"7\" on table \
+             \"TEST_SCHEMA.DDL_PROBE\". SQLSTATE=57007 The table must be reorganized after the \
+             last ALTER TABLE: run CALL SYSPROC.ADMIN_CMD('REORG TABLE \
+             \"TEST_SCHEMA\".\"DDL_PROBE\"')."
+        );
+        // Another reason code is another problem.
+        let other = raw.replace("reason code \"7\"", "reason code \"1\"");
+        assert!(!clean_odbc_message(&other).contains("REORG"));
     }
 
     #[test]

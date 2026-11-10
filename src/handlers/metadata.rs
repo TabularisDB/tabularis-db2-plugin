@@ -3,6 +3,7 @@ use crate::error::PluginResult;
 use crate::models::{
     ForeignKey, Index, RoutineInfo, RoutineParameter, TableColumn, TableInfo, TableSchema, ViewInfo,
 };
+use crate::utils::identifiers::{quote_identifier, quote_qualified_name};
 use crate::utils::types::describe_catalog_type;
 use crate::utils::values::string_literal;
 use std::collections::HashMap;
@@ -360,4 +361,187 @@ pub fn get_schema_snapshot(session: &Session, schema: &str) -> PluginResult<Vec<
             name: table.name,
         })
         .collect())
+}
+
+/// Reconstructs the `CREATE TABLE` of an existing table, with its indexes
+/// and comments, for "Export table to SQL" and "Dump Database".
+///
+/// Columns come with their full type, nullability, default, identity and
+/// generation clause; the primary key and unique constraints are part of
+/// the statement. Foreign keys are left out on purpose: a dump creates
+/// tables one after the other, and a reference to a table that comes later
+/// would stop it.
+pub fn get_table_ddl(session: &Session, schema: &str, table_name: &str) -> PluginResult<String> {
+    let schema_literal = string_literal(schema);
+    let table_literal = string_literal(table_name);
+    let target = quote_qualified_name(Some(schema), table_name);
+
+    let kind = session.query(&format!(
+        "SELECT TYPE, REMARKS FROM SYSCAT.TABLES \
+         WHERE TABSCHEMA = {schema_literal} AND TABNAME = {table_literal} WITH UR"
+    ))?;
+    let Some(table_row) = kind.rows.first() else {
+        return Err(format!("Table {target} was not found"));
+    };
+    match cell(table_row, 0) {
+        Some("T" | "U" | "S" | "G") => {}
+        Some("V") => return Err(format!("{target} is a view, not a table")),
+        _ => {
+            return Err(format!(
+                "{target} is not a table whose definition can be rebuilt"
+            ))
+        }
+    }
+    let table_comment = non_empty(cell(table_row, 1));
+
+    let columns = session.query(&format!(
+        "SELECT COLNAME, TYPENAME, LENGTH, SCALE, CODEPAGE, NULLS, IDENTITY, GENERATED, DEFAULT, \
+                REMARKS, HIDDEN, ROWCHANGETIMESTAMP, TEXT, TYPESCHEMA \
+         FROM SYSCAT.COLUMNS WHERE TABSCHEMA = {schema_literal} AND TABNAME = {table_literal} \
+         ORDER BY COLNO WITH UR"
+    ))?;
+
+    let mut definitions = Vec::new();
+    let mut comments = Vec::new();
+    for row in &columns.rows {
+        let name = cell(row, 0).unwrap_or_default();
+        let described = describe_catalog_type(
+            cell(row, 1).unwrap_or_default(),
+            cell_i64(row, 2),
+            cell_i64(row, 3),
+            cell_i64(row, 4),
+        );
+        let mut type_sql = described.full_type.unwrap_or(described.data_type);
+        // A user-defined type lives in a schema of its own.
+        if let Some(type_schema) = cell(row, 13).map(str::trim) {
+            if !type_schema.starts_with("SYS") {
+                type_sql = quote_qualified_name(Some(type_schema), &type_sql);
+            }
+        }
+
+        let mut definition = format!("{} {type_sql}", quote_identifier(name));
+        if !matches!(cell(row, 5), Some("Y")) {
+            definition.push_str(" NOT NULL");
+        }
+        let generated = match cell(row, 7) {
+            Some("A") => Some("ALWAYS"),
+            Some("D") => Some("BY DEFAULT"),
+            _ => None,
+        };
+        if matches!(cell(row, 6), Some("Y")) {
+            definition.push_str(&format!(
+                " GENERATED {} AS IDENTITY",
+                generated.unwrap_or("ALWAYS")
+            ));
+        } else if matches!(cell(row, 11), Some("Y")) {
+            definition.push_str(&format!(
+                " GENERATED {} FOR EACH ROW ON UPDATE AS ROW CHANGE TIMESTAMP",
+                generated.unwrap_or("ALWAYS")
+            ));
+        } else if let (Some(mode), Some(expression)) = (generated, non_empty(cell(row, 12))) {
+            // SYSCAT.COLUMNS.TEXT holds the clause from AS on: `AS (expr)`.
+            definition.push_str(&format!(" GENERATED {mode} {}", expression.trim()));
+        } else if let Some(default) = non_empty(cell(row, 8)) {
+            definition.push_str(&format!(" DEFAULT {}", default.trim()));
+        }
+        if matches!(cell(row, 10), Some("I")) {
+            definition.push_str(" IMPLICITLY HIDDEN");
+        }
+        definitions.push(definition);
+
+        if let Some(comment) = non_empty(cell(row, 9)) {
+            comments.push(format!(
+                "COMMENT ON COLUMN {target}.{} IS {}",
+                quote_identifier(name),
+                string_literal(&comment)
+            ));
+        }
+    }
+    if definitions.is_empty() {
+        return Err(format!("Table {target} has no columns"));
+    }
+
+    // Primary key and unique constraints, in key order.
+    let keys = session.query(&format!(
+        "SELECT TC.CONSTNAME, TC.TYPE, K.COLNAME \
+         FROM SYSCAT.TABCONST TC \
+         JOIN SYSCAT.KEYCOLUSE K ON K.CONSTNAME = TC.CONSTNAME AND K.TABSCHEMA = TC.TABSCHEMA \
+              AND K.TABNAME = TC.TABNAME \
+         WHERE TC.TABSCHEMA = {schema_literal} AND TC.TABNAME = {table_literal} \
+               AND TC.TYPE IN ('P', 'U') \
+         ORDER BY TC.TYPE, TC.CONSTNAME, K.COLSEQ WITH UR"
+    ))?;
+    let mut constraints: Vec<(String, String, Vec<String>)> = Vec::new();
+    for row in &keys.rows {
+        let name = cell(row, 0).unwrap_or_default().to_string();
+        let kind = cell(row, 1).unwrap_or_default().to_string();
+        let column = quote_identifier(cell(row, 2).unwrap_or_default());
+        match constraints.last_mut() {
+            Some((last, _, columns)) if *last == name => columns.push(column),
+            _ => constraints.push((name, kind, vec![column])),
+        }
+    }
+    for (name, kind, key_columns) in &constraints {
+        let clause = if kind == "P" { "PRIMARY KEY" } else { "UNIQUE" };
+        // Db2 names an unnamed constraint SQL<timestamp>; restating that
+        // name would only make the statement harder to reuse.
+        let prefix = if name.starts_with("SQL") && name[3..].bytes().all(|b| b.is_ascii_digit()) {
+            String::new()
+        } else {
+            format!("CONSTRAINT {} ", quote_identifier(name))
+        };
+        definitions.push(format!("{prefix}{clause} ({})", key_columns.join(", ")));
+    }
+
+    let mut statements = vec![format!(
+        "CREATE TABLE {target} (\n  {}\n)",
+        definitions.join(",\n  ")
+    )];
+
+    // Indexes the user created; the ones backing a key are implied by it.
+    let indexes = session.query(&format!(
+        "SELECT I.INDSCHEMA, I.INDNAME, I.UNIQUERULE, C.COLNAME, C.COLORDER \
+         FROM SYSCAT.INDEXES I \
+         JOIN SYSCAT.INDEXCOLUSE C ON C.INDSCHEMA = I.INDSCHEMA AND C.INDNAME = I.INDNAME \
+         WHERE I.TABSCHEMA = {schema_literal} AND I.TABNAME = {table_literal} \
+               AND I.UNIQUERULE <> 'P' AND I.SYSTEM_REQUIRED = 0 \
+         ORDER BY I.INDNAME, C.COLSEQ WITH UR"
+    ))?;
+    let mut index_list: Vec<(String, bool, Vec<String>)> = Vec::new();
+    for row in &indexes.rows {
+        let name = quote_qualified_name(
+            cell(row, 0).map(str::trim),
+            cell(row, 1).unwrap_or_default(),
+        );
+        let unique = matches!(cell(row, 2), Some("U"));
+        let mut column = quote_identifier(cell(row, 3).unwrap_or_default());
+        if matches!(cell(row, 4), Some("D")) {
+            column.push_str(" DESC");
+        }
+        match index_list.last_mut() {
+            Some((last, _, columns)) if *last == name => columns.push(column),
+            _ => index_list.push((name, unique, vec![column])),
+        }
+    }
+    for (name, unique, index_columns) in index_list {
+        statements.push(format!(
+            "CREATE {}INDEX {name} ON {target} ({})",
+            if unique { "UNIQUE " } else { "" },
+            index_columns.join(", ")
+        ));
+    }
+
+    if let Some(comment) = table_comment {
+        statements.push(format!(
+            "COMMENT ON TABLE {target} IS {}",
+            string_literal(&comment)
+        ));
+    }
+    statements.extend(comments);
+
+    Ok(statements
+        .iter()
+        .map(|statement| format!("{statement};"))
+        .collect::<Vec<_>>()
+        .join("\n\n"))
 }

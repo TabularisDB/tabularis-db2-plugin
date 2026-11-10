@@ -339,24 +339,24 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
         }
 
         // -- DDL generation (pure SQL builders, no connection) ----------------
-        "get_create_table_sql" => Ok(json!(ddl::get_create_table_sql(
+        "get_create_table_sql" => reply(ddl::get_create_table_sql(
             request.text(&["table_name", "table"]).unwrap_or_default(),
             &request.columns("columns")?,
             request.text(&["schema"]),
-        ))),
+        )),
         "get_add_column_sql" => Ok(json!(ddl::get_add_column_sql(
-            request.text(&["table"]).unwrap_or_default(),
+            request.required(&["table"])?,
             &request.column("column")?,
             request.text(&["schema"]),
         ))),
         "get_alter_column_sql" => Ok(json!(ddl::get_alter_column_sql(
-            request.text(&["table"]).unwrap_or_default(),
+            request.required(&["table"])?,
             &request.column("old_column")?,
             &request.column("new_column")?,
             request.text(&["schema"]),
         ))),
-        "get_create_index_sql" => Ok(json!(ddl::get_create_index_sql(
-            request.text(&["table"]).unwrap_or_default(),
+        "get_create_index_sql" => reply(ddl::get_create_index_sql(
+            request.required(&["table"])?,
             request.text(&["index_name"]).unwrap_or_default(),
             &request.strings("columns").unwrap_or_default(),
             request
@@ -365,17 +365,25 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             request.text(&["schema"]),
-        ))),
-        "get_create_foreign_key_sql" => Ok(json!(ddl::get_create_foreign_key_sql(
-            request.text(&["table"]).unwrap_or_default(),
+        )),
+        "get_create_foreign_key_sql" => reply(ddl::get_create_foreign_key_sql(
+            request.required(&["table"])?,
             request.text(&["fk_name"]).unwrap_or_default(),
-            request.text(&["column"]).unwrap_or_default(),
-            request.text(&["ref_table"]).unwrap_or_default(),
-            request.text(&["ref_column"]).unwrap_or_default(),
+            request.required(&["column"])?,
+            request.required(&["ref_table"])?,
+            request.required(&["ref_column"])?,
             request.text(&["on_delete"]),
             request.text(&["on_update"]),
             request.text(&["schema"]),
-        ))),
+        )),
+        "get_table_ddl" => {
+            let (session, schema) = request.schema_session()?;
+            reply(metadata::get_table_ddl(
+                &session,
+                &schema,
+                request.required(&["table"])?,
+            ))
+        }
 
         // -- DDL execution ---------------------------------------------------
         "drop_index" => {

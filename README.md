@@ -67,7 +67,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Insert record | Verified | [#3](https://github.com/TabularisDB/tabularis-db2-plugin/issues/3) |
 | Update record | Verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
 | Delete record | Verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
-| DDL generation | Not yet verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
+| DDL generation | Verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
 | View support | Not yet verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
 | Index management | Not yet verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
 | Foreign key management | Not yet verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
@@ -80,7 +80,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 - **Schema & Object Browsing** — List schemas, tables, columns, views, indexes, foreign keys, and routines.
 - **Query Execution** — Run any SQL statement, with pagination that leaves your `ORDER BY`, `FETCH FIRST` and isolation clauses alone, typed values (integers, floats, booleans, exact decimals, BLOB previews) and Db2's own error messages. Multi-statement scripts run on one connection, and `BEGIN ... END` blocks stay one statement.
 - **Inline Editing** — Insert, update, and delete rows directly from the Tabularis grid, including tables without a primary key: the row is matched on all its columns and exactly one row is changed.
-- **DDL Generation** — Generate `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, and `ADD FOREIGN KEY` SQL.
+- **DDL Generation** — Generate `CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, and `ADD FOREIGN KEY` SQL that Db2 runs as is: quoted identifiers, identity columns, column comments, and the `REORG` a column change needs. Existing tables can be exported and dumped with their real definition.
 - **Modern Plugin Manifest** — Uses current Tabularis plugin manifest fields including `settings`, modern capabilities, color/icon metadata, and connection string support.
 - **Modular Rust Codebase** — RPC, client creation, metadata handlers, CRUD, DDL, and utilities are split into dedicated modules with unit tests.
 
@@ -92,7 +92,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | **String** | CHAR, VARCHAR, CLOB, GRAPHIC, VARGRAPHIC, DBCLOB |
 | **Date/Time** | DATE, TIME, TIMESTAMP |
 | **Binary** | BLOB, BINARY, VARBINARY |
-| **Other** | XML, JSON |
+| **Other** | BOOLEAN, XML |
 
 ## Requirements
 
@@ -183,11 +183,12 @@ The code is intentionally split by responsibility:
 | `get_schema_snapshot` | Returns all tables with columns and foreign keys |
 | `get_all_columns_batch` | Returns all column metadata for a schema |
 | `get_all_foreign_keys_batch` | Returns all FK metadata for a schema |
-| `get_create_table_sql` | Generates `CREATE TABLE` SQL |
-| `get_add_column_sql` | Generates `ALTER TABLE ... ADD COLUMN` SQL |
-| `get_alter_column_sql` | Generates `ALTER TABLE ... ALTER/RENAME COLUMN` SQL |
-| `get_create_index_sql` | Generates `CREATE INDEX` SQL |
-| `get_create_foreign_key_sql` | Generates FK DDL |
+| `get_create_table_sql` | Generates `CREATE TABLE` (identity columns, defaults, primary key) and `COMMENT ON COLUMN` statements |
+| `get_add_column_sql` | Generates `ALTER TABLE ... ADD COLUMN`; a `NOT NULL` column without a default gets `WITH DEFAULT`, which Db2 requires on a table with rows |
+| `get_alter_column_sql` | Generates one statement per changed attribute (rename, type, nullability, default, identity, comment), followed by `REORG TABLE` when the change requires it |
+| `get_create_index_sql` | Generates `CREATE [UNIQUE] INDEX` in the table's schema |
+| `get_create_foreign_key_sql` | Generates `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY`; referential actions Db2 does not have (`ON UPDATE CASCADE`) are refused |
+| `get_table_ddl` | Rebuilds the `CREATE TABLE` of an existing table from the catalog, with its indexes and comments, for table export and database dumps |
 | `drop_index` | Executes `DROP INDEX` |
 | `drop_foreign_key` | Executes `ALTER TABLE ... DROP FOREIGN KEY` |
 
@@ -359,6 +360,10 @@ and publishes the release with that changelog section as its notes.
 - Every statement is committed on its own: connections run in autocommit mode and are not kept between requests, so an explicit transaction cannot span several statements run from the editor. Wrap the statements in a `BEGIN ... END` compound statement to run them atomically.
 - A `BLOB` in a query result carries its first 10,240 bytes and its full size; `BINARY`, `VARBINARY` and `FOR BIT DATA` values are shown as hexadecimal text.
 - Paging skips rows on the cursor, so a very deep page of a very large result takes longer than the first ones. Filter or order the result to get to the rows you need.
+- Changing a column's type or nullability, or dropping a column, leaves a Db2 table in "reorg pending" state. The statements generated by the column editor end with the `REORG TABLE` that clears it; after an `ALTER TABLE` of your own (or the "Delete Column" action), run the `CALL SYSPROC.ADMIN_CMD('REORG TABLE ...')` the error message suggests.
+- Db2 only supports `NO ACTION` and `RESTRICT` for `ON UPDATE`, and has no `SET DEFAULT` referential action; the foreign key editor reports that instead of generating SQL that cannot run.
+- A dump or export keeps identity columns as they are defined. Restoring rows into a `GENERATED ALWAYS` identity column fails (`SQL0798N`), as Db2 does not accept explicit values there; foreign keys are not part of the generated `CREATE TABLE`.
+- Db2 has no `JSON` column type (JSON is stored in `CLOB`, `VARCHAR` or `BLOB` columns), so it is not offered when creating a column.
 - `get_databases` is intentionally conservative and currently returns the active server/database identity instead of enumerating every possible database on an instance.
 
 ## [Changelog](./CHANGELOG.md)

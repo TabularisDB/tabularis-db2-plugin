@@ -75,6 +75,12 @@ recreating the container.
   validated literals, text and binary data as bound parameters (`Param`),
   never as text spliced into the statement. `crud::row_condition` builds
   the `WHERE` of a row from the host's `pk_map` the same way.
+- `handlers::ddl` builds the table designer's SQL without a connection.
+  Quote every identifier, keep one statement per change, and end with
+  `reorg_sql` whenever a statement leaves the table in "reorg pending"
+  state (a type or nullability change). Anything Db2 cannot do is an error
+  from the builder, never SQL that will fail when run. Each builder has an
+  integration test that runs its output on Db2.
 - ODBC errors reach the user through `error::odbc_error`, which keeps the
   Db2 message and drops the ODBC call name and driver tags.
 - Pure helpers (identifier quoting, literals, pagination math, type
