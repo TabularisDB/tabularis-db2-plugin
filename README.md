@@ -126,8 +126,9 @@ search for **Db2**, and install.
 1. Download the latest release for your platform from the
    [Releases page](https://github.com/TabularisDB/tabularis-db2-plugin/releases).
 2. Extract the archive.
-3. Copy `tabularis-db2-plugin` (or `tabularis-db2-plugin.exe` on Windows) and
-   `.tabularium` into the Tabularis plugins directory:
+3. Copy everything the archive contains (`tabularis-db2-plugin` or
+   `tabularis-db2-plugin.exe`, `.tabularium` and the `explain/` folder with
+   the Visual EXPLAIN parser) into the Tabularis plugins directory:
 
    | OS | Plugins Directory |
    | --- | --- |
@@ -150,10 +151,16 @@ The code is intentionally split by responsibility:
 - `src/main.rs` — request loop and dispatch
 - `src/client.rs` — ODBC connection string construction, one connection per request, text fetching
 - `src/handlers/metadata.rs` — schemas, tables, columns, views, indexes, FKs, routines
-- `src/handlers/query.rs` — connection test, query execution, explain plan
+- `src/handlers/query.rs` — connection test, query execution
+- `src/handlers/explain.rs` — `EXPLAIN PLAN`, read back from the explain tables
 - `src/handlers/crud.rs` — insert, update, delete
 - `src/handlers/ddl.rs` — SQL generation helpers
 - `src/utils/` — pure helpers with unit tests
+- `explain/` — the Visual EXPLAIN parser (TypeScript): turns the explain-table
+  rows `explain_query` returns into the plan tree Tabularis draws. It is built
+  into `explain/dist/index.iife.js`, declared under `explain_parsers` in
+  `.tabularium` and shipped in every release archive, the same way as the SQL
+  Server plugin's SHOWPLAN parser.
 
 ## Supported Operations
 
@@ -176,7 +183,7 @@ The code is intentionally split by responsibility:
 | `get_routine_definition` | Returns the `CREATE` statement of an SQL routine |
 | `execute_query` | Runs one statement. A result set (`SELECT`, `WITH`, `VALUES`, `CALL`) is paged on the cursor and returned with typed values; anything else returns the number of rows it changed |
 | `execute_query_batch` | Runs the statements of a script in order on one connection, reporting each one's result or error |
-| `explain_query` | Returns Db2's access plan as a tree: operators with their tables and indexes, estimated rows and costs, predicates and join types; with `analyze`, the statement also runs and its real row count and time are reported |
+| `explain_query` | Returns Db2's access plan in Tabularis's raw form (`engine: db2`, `format: db2-explain-tables-json`): the rows of the explain tables, which the plugin's parser draws with tables and indexes, row estimates, costs, predicates and join types. With `analyze`, the statement also runs and its real row count and time are reported |
 | `insert_record` | Inserts a row, rendering each value for its column type (numbers validated, text and binary data bound as parameters, `NULL`, column defaults, BLOB uploads) |
 | `fetch_blob_as_data_url` / `save_blob_to_file` | Read the whole value of a binary column for the preview and for export |
 | `update_record` | Sets one column of one row, found by its primary key (single or composite) or, for a table without one, by the values of all its columns |
@@ -199,6 +206,8 @@ The code is intentionally split by responsibility:
 
 - [Rust](https://www.rust-lang.org/tools/install) (edition 2021)
 - [`just`](https://github.com/casey/just) (optional, wraps the common cargo invocations)
+- [Node.js](https://nodejs.org/) 22.18 or later and [pnpm](https://pnpm.io/)
+  (the version pinned in `explain/package.json`), for the Visual EXPLAIN parser
 - The ODBC driver manager development files (`unixodbc-dev` on Debian/Ubuntu,
   `brew install unixodbc` on macOS; nothing to install on Windows)
 - A Db2 ODBC driver and a running Db2 instance (for integration tests)
@@ -206,8 +215,9 @@ The code is intentionally split by responsibility:
 ### Build
 
 ```bash
-just build      # debug build
+just build      # debug build, plus the Visual EXPLAIN parser bundle
 just release    # release build (what the GitHub Actions workflow ships)
+just build-explain   # the parser bundle alone (explain/dist/index.iife.js)
 ```
 
 Or directly with cargo:
@@ -221,7 +231,7 @@ The binary will be located at `target/release/tabularis-db2-plugin`.
 ### Install Locally
 
 ```bash
-just dev-install   # build + copy binary and manifest into the Tabularis plugins dir
+just dev-install   # build + copy binary, manifest and parser bundle into the Tabularis plugins dir
 just uninstall     # remove the installed plugin
 ```
 
@@ -300,7 +310,13 @@ just test    # cargo test --bins — unit tests for SQL builders, quoting, pagin
 just lint    # clippy -D warnings
 just fmt     # cargo fmt --all
 just validate-manifest   # .tabularium against the live registry schema
+just test-explain        # typecheck and test the Visual EXPLAIN parser
 ```
+
+The parser's tests (`explain/tests/`) run on explain payloads captured from
+Db2 12.1 and compare the plans with committed goldens. Regenerate the goldens
+with `UPDATE_GOLDENS=1 pnpm --dir explain test` after an intended change, and
+review the diff.
 
 ### Smoke Test the Plugin Process
 
@@ -351,6 +367,7 @@ and publishes the release with that changelog section as its notes.
 - **Language:** Rust (edition 2021)
 - **Database driver:** [`odbc-api`](https://crates.io/crates/odbc-api)
 - **Serialization:** serde + serde_json
+- **Visual EXPLAIN parser:** TypeScript, bundled with tsup, tested with vitest
 - **Protocol:** JSON-RPC 2.0 over stdio
 
 ## Known Limitations

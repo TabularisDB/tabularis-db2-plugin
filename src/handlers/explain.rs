@@ -1,23 +1,30 @@
-//! `explain_query`: Db2's access plan for a statement, as Tabularis's
-//! Visual EXPLAIN draws it.
+//! `explain_query`: Db2's access plan for a statement, for Tabularis's
+//! Visual EXPLAIN.
 //!
 //! `EXPLAIN PLAN` compiles the statement without running it and writes the
 //! plan into the explain tables. Each request tags its statement with a
 //! `QUERYTAG` of its own, reads back only the rows with that tag and
 //! deletes them afterwards, so concurrent explains never mix and the tables
 //! do not grow with every click.
+//!
+//! The rows go back as they are, in the raw form Tabularis hands to the
+//! parser this plugin ships (`explain/`), which builds the tree.
 
 use crate::client::Session;
 use crate::error::PluginResult;
 use crate::handlers::query::single_statement;
-use crate::models::ExplainPlan;
-use crate::utils::explain::{
-    build_plan_tree, plan_text, planning_time_ms, Argument, Operator, PlanRows, Predicate, Stream,
-    StreamSource,
+use crate::models::{
+    Db2ExplainPayload, ExplainAnalyze, ExplainArgument, ExplainIndex, ExplainOperator,
+    ExplainPredicate, ExplainStream, RawExplain,
 };
 use crate::utils::identifiers::quote_identifier;
 use crate::utils::values::string_literal;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// What Tabularis matches the parser on; `.tabularium` declares the same
+/// pair under `explain_parsers`.
+pub const ENGINE: &str = "db2";
+pub const FORMAT: &str = "db2-explain-tables-json";
 
 fn cell(row: &[Option<String>], index: usize) -> Option<&str> {
     row.get(index).and_then(|value| value.as_deref())
@@ -100,7 +107,18 @@ fn plan_rows_of(tables: &str, table: &str, tag: &str) -> String {
     format!("{} {}", plan_table(tables, table), tagged(tag))
 }
 
-fn read_plan(session: &Session, tables: &str, tag: &str) -> PluginResult<PlanRows> {
+fn optional_text(row: &[Option<String>], index: usize) -> Option<String> {
+    cell(row, index)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_plan(
+    session: &Session,
+    tables: &str,
+    tag: &str,
+    schema: &str,
+) -> PluginResult<Db2ExplainPayload> {
     let operators = session
         .query(&format!(
             "SELECT X.OPERATOR_ID, X.OPERATOR_TYPE, X.TOTAL_COST, X.IO_COST, X.CPU_COST, \
@@ -109,7 +127,7 @@ fn read_plan(session: &Session, tables: &str, tag: &str) -> PluginResult<PlanRow
         ))?
         .rows
         .iter()
-        .map(|row| Operator {
+        .map(|row| ExplainOperator {
             id: integer(row, 0),
             operator_type: text(row, 1),
             total_cost: number(row, 2),
@@ -129,16 +147,12 @@ fn read_plan(session: &Session, tables: &str, tag: &str) -> PluginResult<PlanRow
         ))?
         .rows
         .iter()
-        .map(|row| Stream {
-            source: if text(row, 0) == "D" {
-                StreamSource::Object {
-                    schema: text(row, 3),
-                    name: text(row, 4),
-                }
-            } else {
-                StreamSource::Operator(integer(row, 1))
-            },
-            target: integer(row, 2),
+        .map(|row| ExplainStream {
+            source_type: text(row, 0),
+            source_id: integer(row, 1),
+            target_id: integer(row, 2),
+            object_schema: optional_text(row, 3),
+            object_name: optional_text(row, 4),
             count: number(row, 5),
         })
         .collect();
@@ -152,7 +166,7 @@ fn read_plan(session: &Session, tables: &str, tag: &str) -> PluginResult<PlanRow
         .rows
         .iter()
         .filter(|row| cell(row, 2).is_some())
-        .map(|row| Predicate {
+        .map(|row| ExplainPredicate {
             operator_id: integer(row, 0),
             how_applied: text(row, 1),
             text: text(row, 2),
@@ -168,34 +182,42 @@ fn read_plan(session: &Session, tables: &str, tag: &str) -> PluginResult<PlanRow
         ))?
         .rows
         .iter()
-        .map(|row| Argument {
+        .map(|row| ExplainArgument {
             operator_id: integer(row, 0),
-            kind: text(row, 1),
+            argument_type: text(row, 1),
             value: text(row, 2),
         })
         .collect();
 
     // The plan names the indexes it reads; their tables are in the catalog.
-    let index_tables = session
+    let indexes = session
         .query(&format!(
             "SELECT X.OBJECT_SCHEMA, X.OBJECT_NAME, I.TABSCHEMA, I.TABNAME {} \
              JOIN SYSCAT.INDEXES I \
              ON I.INDSCHEMA = X.OBJECT_SCHEMA AND I.INDNAME = X.OBJECT_NAME \
-             {} AND X.OBJECT_TYPE = 'IX' WITH UR",
+             {} AND X.OBJECT_TYPE = 'IX' ORDER BY 1, 2 WITH UR",
             plan_table(tables, "EXPLAIN_OBJECT"),
             tagged(tag)
         ))?
         .rows
         .iter()
-        .map(|row| ((text(row, 0), text(row, 1)), (text(row, 2), text(row, 3))))
+        .map(|row| ExplainIndex {
+            schema: text(row, 0),
+            name: text(row, 1),
+            table_schema: text(row, 2),
+            table_name: text(row, 3),
+        })
         .collect();
 
-    Ok(PlanRows {
+    Ok(Db2ExplainPayload {
+        db2_explain: 1,
+        schema: schema.to_string(),
         operators,
         streams,
         predicates,
         arguments,
-        index_tables,
+        indexes,
+        analyze: None,
     })
 }
 
@@ -216,16 +238,15 @@ fn discard_plan(session: &Session, tables: &str, tag: &str) {
 /// The access plan of `query`, read in the schema the session works in.
 ///
 /// With `analyze` the statement is also run, as Tabularis's Analyze option
-/// promises, and the plan carries what Db2 can say about that run without
+/// promises, and the payload carries what Db2 can say about that run without
 /// an activity event monitor: the time it took and the number of rows it
-/// returned or changed, on the top operator. The estimates of the other
-/// operators stay estimates.
+/// returned or changed.
 pub fn explain_query(
     session: &Session,
     schema: &str,
     query: &str,
     analyze: bool,
-) -> PluginResult<ExplainPlan> {
+) -> PluginResult<RawExplain> {
     let statement = single_statement(query)?;
     let tables = quote_identifier(&explain_tables(session)?);
     let tag = query_tag();
@@ -246,39 +267,34 @@ pub fn explain_query(
             error
         });
     }
-    let rows = read_plan(session, &tables, &tag);
+    let payload = read_plan(session, &tables, &tag, schema);
     discard_plan(session, &tables, &tag);
-    let rows = rows?;
+    let mut payload = payload?;
+    if payload.operators.is_empty() {
+        return Err("Db2 wrote no access plan for this statement".to_string());
+    }
 
-    let mut root = build_plan_tree(&rows, schema)
-        .ok_or_else(|| "Db2 wrote no access plan for this statement".to_string())?;
-
-    let execution_time_ms = if analyze {
+    if analyze {
         let started = Instant::now();
-        let count = session.drain(statement)?;
-        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        root.actual_rows = Some(count as f64);
-        root.actual_time_ms = Some(elapsed);
-        root.actual_loops = Some(1);
-        Some(elapsed)
-    } else {
-        None
-    };
+        let rows = session.drain(statement)?;
+        payload.analyze = Some(ExplainAnalyze {
+            rows,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        });
+    }
 
-    Ok(ExplainPlan {
-        raw_output: Some(plan_text(&root)),
-        root,
-        planning_time_ms: planning_time_ms(&rows),
-        execution_time_ms,
+    Ok(RawExplain {
+        engine: ENGINE,
+        format: FORMAT,
+        payload: serde_json::to_string(&payload).map_err(|error| error.to_string())?,
         original_query: query.to_string(),
-        driver: "db2".to_string(),
-        has_analyze_data: analyze,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{plan_rows_of, query_tag};
+    use crate::models::Db2ExplainPayload;
 
     #[test]
     fn query_tags_fit_the_column() {
@@ -294,5 +310,16 @@ mod tests {
             "FROM \"SYSTOOLS\".EXPLAIN_OPERATOR X JOIN \"SYSTOOLS\".EXPLAIN_STATEMENT S"
         ));
         assert!(sql.ends_with("WHERE S.QUERYTAG = 'T''1' AND S.EXPLAIN_LEVEL = 'P'"));
+    }
+
+    #[test]
+    fn the_version_key_comes_first() {
+        // The parser recognises a Db2 payload by its first bytes.
+        let payload = serde_json::to_string(&Db2ExplainPayload {
+            db2_explain: 1,
+            ..Default::default()
+        })
+        .expect("payload");
+        assert!(payload.starts_with("{\"db2_explain\":1,"), "{payload}");
     }
 }

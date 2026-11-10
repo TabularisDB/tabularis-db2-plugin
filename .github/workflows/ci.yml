@@ -64,14 +64,50 @@ jobs:
       # The release workflow rejects a tag that disagrees with .tabularium;
       # catching a Cargo.toml drift here keeps `--version`-style diagnostics
       # and the manifest telling the same story.
-      - name: Check Cargo.toml and .tabularium agree on the version
+      - name: Check Cargo.toml, explain/package.json and .tabularium agree on the version
         run: |
           MANIFEST_VERSION=$(jq -r .version .tabularium)
           CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          EXPLAIN_VERSION=$(jq -r .version explain/package.json)
           if [ "$MANIFEST_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::.tabularium version ($MANIFEST_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1
           fi
+          if [ "$MANIFEST_VERSION" != "$EXPLAIN_VERSION" ]; then
+            echo "::error::.tabularium version ($MANIFEST_VERSION) does not match explain/package.json version ($EXPLAIN_VERSION)"
+            exit 1
+          fi
+
+  explain-package:
+    name: EXPLAIN parser package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Installs the pnpm version pinned by "packageManager" in
+      # explain/package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: explain/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          # tsup 9 requires Node 22.18 or newer on the Node 22 line.
+          node-version: "22.18"
+
+      - name: Install dependencies
+        working-directory: explain
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: explain
+        run: pnpm typecheck
+
+      - name: Test (builds the bundle first)
+        working-directory: explain
+        run: pnpm test
 
   pr-title:
     name: PR title (Conventional Commits)

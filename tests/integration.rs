@@ -4664,36 +4664,52 @@ fn test_drop_foreign_key() {
 // Tests — Explain query
 // ---------------------------------------------------------------------------
 
-/// Every node of a plan, depth first.
-fn plan_nodes(node: &Value) -> Vec<&Value> {
-    let mut nodes = vec![node];
-    for child in node["children"].as_array().into_iter().flatten() {
-        nodes.extend(plan_nodes(child));
-    }
-    nodes
-}
-
-/// `TYPE on RELATION` for every node, indented by depth.
-fn plan_shape(node: &Value, depth: usize, out: &mut Vec<String>) {
-    let relation = node["relation"]
-        .as_str()
-        .map(|relation| format!(" on {relation}"))
-        .unwrap_or_default();
-    out.push(format!(
-        "{}{}{relation}",
-        "  ".repeat(depth),
-        node["node_type"].as_str().expect("node_type")
-    ));
-    for child in node["children"].as_array().into_iter().flatten() {
-        plan_shape(child, depth + 1, out);
-    }
-}
-
 fn explain(p: &mut Plugin, query: &str, analyze: bool) -> Value {
     p.call(
         "explain_query",
         p.schema_params(json!({ "query": query, "analyze": analyze })),
     )
+}
+
+/// The Db2 payload of a successful `explain_query`, after checking the raw
+/// envelope Tabularis hands to the plugin's parser.
+fn explain_payload(p: &mut Plugin, query: &str, analyze: bool) -> Value {
+    let resp = explain(p, query, analyze);
+    let result = &resp["result"];
+    assert_eq!(result["engine"], "db2", "{resp}");
+    assert_eq!(result["format"], "db2-explain-tables-json", "{resp}");
+    assert_eq!(result["original_query"], query);
+    let payload = result["payload"].as_str().expect("payload");
+    assert!(payload.starts_with("{\"db2_explain\":1,"), "{payload}");
+    serde_json::from_str(payload).expect("payload is JSON")
+}
+
+fn operator_types(payload: &Value) -> Vec<String> {
+    payload["operators"]
+        .as_array()
+        .expect("operators")
+        .iter()
+        .map(|operator| operator["type"].as_str().expect("type").to_string())
+        .collect()
+}
+
+/// `(schema, name)` of every table or index streamed into an operator.
+fn objects_read(payload: &Value) -> Vec<(String, String)> {
+    payload["streams"]
+        .as_array()
+        .expect("streams")
+        .iter()
+        .filter(|stream| stream["source_type"] == "D")
+        .map(|stream| {
+            (
+                stream["object_schema"]
+                    .as_str()
+                    .expect("schema")
+                    .to_string(),
+                stream["object_name"].as_str().expect("name").to_string(),
+            )
+        })
+        .collect()
 }
 
 fn explain_rows_left(p: &mut Plugin) -> i64 {
@@ -4710,36 +4726,30 @@ fn test_explain_query() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let query = "SELECT * FROM EMPLOYEES WHERE DEPT_ID = 1;";
-    let resp = explain(&mut p, query, false);
-    let result = &resp["result"];
+    let payload = explain_payload(&mut p, "SELECT * FROM EMPLOYEES WHERE DEPT_ID = 1;", false);
 
-    assert_eq!(result["driver"], "db2");
-    assert_eq!(result["original_query"], query);
-    assert_eq!(result["has_analyze_data"], false);
-    assert!(result["execution_time_ms"].is_null());
-    assert!(
-        result["planning_time_ms"].as_f64().is_some(),
-        "Db2 reports the time it took to compile the statement: {result}"
-    );
-
-    let root = &result["root"];
-    assert_eq!(root["node_type"], "RETURN");
-    assert_eq!(root["id"], "1");
+    assert_eq!(payload["schema"], "TEST_SCHEMA");
+    assert!(payload["analyze"].is_null());
+    assert_eq!(operator_types(&payload), ["RETURN", "TBSCAN"]);
+    let root = &payload["operators"][0];
+    assert_eq!(root["id"], 1);
     assert!(root["total_cost"].as_f64().expect("cost") > 0.0);
-    assert!(root["plan_rows"].as_f64().is_some(), "{root}");
-    assert!(root["actual_rows"].is_null());
-
-    let mut shape = Vec::new();
-    plan_shape(root, 0, &mut shape);
-    assert_eq!(shape, ["RETURN", "  TBSCAN on EMPLOYEES"]);
-    let scan = &root["children"][0];
-    assert_eq!(scan["filter"], "(Q1.DEPT_ID = 1)");
-    assert_eq!(scan["extra"]["access_type"], "ALL");
-
-    let raw = result["raw_output"].as_str().expect("raw_output");
-    assert!(raw.starts_with("1 RETURN (cost="), "{raw}");
-    assert!(raw.contains("2 TBSCAN on EMPLOYEES"), "{raw}");
+    assert_eq!(
+        objects_read(&payload),
+        [("TEST_SCHEMA".to_string(), "EMPLOYEES".to_string())]
+    );
+    assert_eq!(
+        payload["predicates"],
+        json!([{ "operator_id": 2, "how_applied": "SARG", "text": "(Q1.DEPT_ID = 1)" }])
+    );
+    assert!(
+        payload["arguments"]
+            .as_array()
+            .expect("arguments")
+            .iter()
+            .any(|argument| argument["type"] == "PREPTIME"),
+        "Db2 reports the time it took to compile the statement: {payload}"
+    );
 }
 
 #[test]
@@ -4747,81 +4757,49 @@ fn test_explain_query_join() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let resp = explain(
+    let payload = explain_payload(
         &mut p,
         "SELECT E.LAST_NAME, D.DEPT_NAME FROM EMPLOYEES E \
          LEFT JOIN DEPARTMENTS D ON D.DEPT_ID = E.DEPT_ID \
          WHERE E.EMP_ID BETWEEN 2 AND 5 AND E.SALARY > 1000 ORDER BY E.LAST_NAME",
         false,
     );
-    let root = &resp["result"]["root"];
-    let nodes = plan_nodes(root);
 
-    // Data objects are not operators: they name what an operator reads.
-    for node in &nodes {
-        assert_ne!(node["id"], "-1", "{node}");
-        assert_ne!(node["node_type"], "Unknown", "{node}");
-    }
+    let types = operator_types(&payload);
+    assert!(types.iter().any(|t| t.ends_with("JOIN")), "{types:?}");
+    assert!(types.contains(&"IXSCAN".to_string()), "{types:?}");
 
-    let join = nodes
-        .iter()
-        .find(|node| node["node_type"].as_str().unwrap_or("").ends_with("JOIN"))
-        .expect("a join");
-    assert_eq!(join["children"].as_array().expect("inputs").len(), 2);
+    // The index the plan reads comes with its table.
+    let indexes = payload["indexes"].as_array().expect("indexes");
+    assert_eq!(indexes.len(), 1, "{payload}");
+    assert_eq!(indexes[0]["table_schema"], "TEST_SCHEMA");
+    assert_eq!(indexes[0]["table_name"], "EMPLOYEES");
+    let objects = objects_read(&payload);
     assert!(
-        ["Left", "Right"].contains(&join["join_type"].as_str().unwrap_or("")),
-        "an outer join keeps the rows of one side: {join}"
+        objects.contains(&(
+            indexes[0]["schema"].as_str().unwrap().to_string(),
+            indexes[0]["name"].as_str().unwrap().to_string()
+        )),
+        "{objects:?}"
     );
-    let condition = if join["node_type"] == "HSJOIN" {
-        join["hash_condition"].as_str()
-    } else {
-        join["extra"]["join_condition"].as_str()
-    };
-    assert!(
-        condition.expect("join condition").contains(".DEPT_ID = "),
-        "{join}"
-    );
+    assert!(objects.contains(&("TEST_SCHEMA".to_string(), "DEPARTMENTS".to_string())));
 
-    let relations: Vec<&str> = nodes
+    let applied: Vec<&str> = payload["predicates"]
+        .as_array()
+        .expect("predicates")
         .iter()
-        .filter_map(|node| node["relation"].as_str())
+        .map(|predicate| predicate["how_applied"].as_str().unwrap())
         .collect();
-    assert!(relations.contains(&"EMPLOYEES"), "{relations:?}");
-    assert!(relations.contains(&"DEPARTMENTS"), "{relations:?}");
-
-    // The range on the primary key is applied by the index scan.
-    let index_scan = nodes
+    for how in ["JOIN", "START", "STOP", "SARG"] {
+        assert!(applied.contains(&how), "{how} missing: {applied:?}");
+    }
+    let outer_join = payload["arguments"]
+        .as_array()
+        .expect("arguments")
         .iter()
-        .find(|node| node["node_type"] == "IXSCAN")
-        .expect("an index scan");
-    assert_eq!(index_scan["relation"], "EMPLOYEES");
-    assert!(
-        index_scan["extra"]["index"].as_str().is_some(),
-        "{index_scan}"
-    );
-    let range = index_scan["index_condition"].as_str().expect("range");
-    assert!(
-        range.contains("EMP_ID <= 5") && range.contains("2 <= "),
-        "{range}"
-    );
-
-    assert!(
-        nodes
-            .iter()
-            .any(|node| node["filter"].as_str() == Some("(1000 < Q2.SALARY)")),
-        "the salary predicate is a filter somewhere: {root}"
-    );
-    let sort = nodes
-        .iter()
-        .find(|node| node["node_type"] == "SORT")
-        .expect("a sort");
-    assert!(
-        sort["extra"]["SORTKEY"]
-            .as_str()
-            .expect("sort key")
-            .contains("LAST_NAME"),
-        "{sort}"
-    );
+        .find(|argument| argument["type"] == "OUTERJN")
+        .expect("an outer join argument");
+    assert!(["LEFT", "RIGHT"].contains(&outer_join["value"].as_str().unwrap()));
 }
 
 #[test]
@@ -4829,16 +4807,14 @@ fn test_explain_query_other_schema_and_delimited_names() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let resp = explain(
+    let payload = explain_payload(
         &mut p,
         "SELECT COUNT(*) FROM \"Mixed Case\".\"Order Details\"",
         false,
     );
-    let relations: Vec<String> = plan_nodes(&resp["result"]["root"])
-        .iter()
-        .filter_map(|node| node["relation"].as_str().map(ToString::to_string))
-        .collect();
-    assert_eq!(relations, ["Mixed Case.Order Details"], "{resp}");
+    let indexes = payload["indexes"].as_array().expect("indexes");
+    assert_eq!(indexes[0]["table_schema"], "Mixed Case", "{payload}");
+    assert_eq!(indexes[0]["table_name"], "Order Details", "{payload}");
 }
 
 #[test]
@@ -4846,11 +4822,8 @@ fn test_explain_query_data_change_is_not_run() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let resp = explain(&mut p, "DELETE FROM PAGING_TEST WHERE N <= 10", false);
-    let mut shape = Vec::new();
-    plan_shape(&resp["result"]["root"], 0, &mut shape);
-    assert_eq!(shape[0], "RETURN", "{shape:?}");
-    assert_eq!(shape[1], "  DELETE", "{shape:?}");
+    let payload = explain_payload(&mut p, "DELETE FROM PAGING_TEST WHERE N <= 10", false);
+    assert_eq!(operator_types(&payload)[..2], ["RETURN", "DELETE"]);
 
     let count = p.query_ok(
         "SELECT COUNT(*) FROM PAGING_TEST WHERE N <= 10",
@@ -4868,22 +4841,10 @@ fn test_explain_query_analyze() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let resp = explain(&mut p, "SELECT * FROM PAGING_TEST WHERE N > 100", true);
-    let result = &resp["result"];
-    assert_eq!(result["has_analyze_data"], true, "{resp}");
-
-    // The statement ran: the top operator carries what really came back.
-    let root = &result["root"];
-    assert_eq!(root["actual_rows"], 1100.0);
-    assert_eq!(root["actual_loops"], 1);
-    let elapsed = result["execution_time_ms"]
-        .as_f64()
-        .expect("execution time");
-    assert_eq!(root["actual_time_ms"].as_f64(), Some(elapsed));
-    // The operators below keep their estimates only.
-    for node in plan_nodes(root).iter().skip(1) {
-        assert!(node["actual_rows"].is_null(), "{node}");
-    }
+    let payload = explain_payload(&mut p, "SELECT * FROM PAGING_TEST WHERE N > 100", true);
+    // The statement ran: the payload carries what really came back.
+    assert_eq!(payload["analyze"]["rows"], 1100, "{payload}");
+    assert!(payload["analyze"]["elapsed_ms"].as_f64().expect("time") > 0.0);
 }
 
 #[test]
