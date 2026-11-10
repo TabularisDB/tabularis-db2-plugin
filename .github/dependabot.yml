@@ -8,6 +8,12 @@ updates:
     directory: "/explain"
     schedule:
       interval: "weekly"
+    ignore:
+      # TypeScript 7 drops the compiler API that tsup's declaration build
+      # (rollup-plugin-dts) needs, so the parser no longer builds on it.
+      # Lift this once tsup supports TypeScript 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

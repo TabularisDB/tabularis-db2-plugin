@@ -1,6 +1,6 @@
 {
   "name": "@tabularis/explain-db2",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "private": true,
   "description": "IBM Db2 explain-table parser for Tabularis Visual EXPLAIN",
   "license": "Apache-2.0",

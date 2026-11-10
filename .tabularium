@@ -2,8 +2,8 @@
   "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
   "id": "db2",
   "name": "Db2",
-  "version": "0.0.3",
-  "description": "IBM Db2 driver plugin for Tabularis",
+  "version": "0.1.0",
+  "description": "IBM Db2 driver for Tabularis over ODBC: browse schemas, tables, views and routines, edit rows with type-aware binding, generate DDL for tables, columns, indexes and foreign keys, and draw Visual EXPLAIN plans from Db2's explain tables.",
   "category": "database",
   "tags": [
     "driver",
@@ -15,6 +15,68 @@
   ],
   "license": "Apache-2.0",
   "icon": "assets/icon.png",
+  "screenshots": [
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/01-schema-browser.png",
+      "caption": "Schema browser with tables, views and routines",
+      "alt": "Sidebar tree of a Db2 schema with tables, columns, keys, indexes, views and routines"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/02-data-grid-pagination.png",
+      "caption": "Paged data grid",
+      "alt": "Data grid of a Db2 table with typed values and pagination"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/03-sql-console.png",
+      "caption": "SQL console",
+      "alt": "SQL editor with a Db2 query and its result"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/04-new-row.png",
+      "caption": "Inserting a row",
+      "alt": "Data grid with a new row being added"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/05-inline-edit.png",
+      "caption": "Inline cell editing",
+      "alt": "Data grid with a cell being edited in place"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/07-create-table.png",
+      "caption": "Creating a table",
+      "alt": "Create table dialog with Db2 column types"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/08-modify-column.png",
+      "caption": "Modifying a column",
+      "alt": "Column editor generating ALTER TABLE and REORG statements"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/09-edit-view.png",
+      "caption": "Editing a view",
+      "alt": "View editor with the view's query"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/10-indexes.png",
+      "caption": "Indexes",
+      "alt": "Index list of a table, with columns and uniqueness"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/11-foreign-key-details.png",
+      "caption": "Foreign keys",
+      "alt": "Foreign key details with referential actions"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/12-routines.png",
+      "caption": "Functions and procedures",
+      "alt": "Routines grouped into functions and procedures, with parameters and a definition"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-db2-plugin/master/assets/screenshots/13-visual-explain.png",
+      "caption": "Visual EXPLAIN",
+      "alt": "Visual EXPLAIN of a Db2 join with costs, estimates and the hash join condition"
+    }
+  ],
   "color": "#2563eb",
   "readme": "README.md",
   "homepage": "https://github.com/TabularisDB/tabularis-db2-plugin",
