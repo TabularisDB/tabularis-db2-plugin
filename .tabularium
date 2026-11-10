@@ -181,6 +181,7 @@
     "auto_increment_keyword": "",
     "serial_type": "",
     "inline_pk": false,
+    "column_comments": true,
     "alter_column": true,
     "create_foreign_keys": true,
     "no_connection_required": false,
@@ -227,21 +228,21 @@
       "category": "numeric",
       "requires_length": false,
       "requires_precision": false,
-      "supports_auto_increment": false
+      "supports_auto_increment": true
     },
     {
       "name": "INTEGER",
       "category": "numeric",
       "requires_length": false,
       "requires_precision": false,
-      "supports_auto_increment": false
+      "supports_auto_increment": true
     },
     {
       "name": "BIGINT",
       "category": "numeric",
       "requires_length": false,
       "requires_precision": false,
-      "supports_auto_increment": false
+      "supports_auto_increment": true
     },
     {
       "name": "DECIMAL",
@@ -254,7 +255,7 @@
       "name": "DECFLOAT",
       "category": "numeric",
       "requires_length": false,
-      "requires_precision": true,
+      "requires_precision": false,
       "supports_auto_increment": false
     },
     {
@@ -365,15 +366,15 @@
       "supports_auto_increment": false
     },
     {
-      "name": "XML",
-      "category": "other",
+      "name": "BOOLEAN",
+      "category": "boolean",
       "requires_length": false,
       "requires_precision": false,
       "supports_auto_increment": false
     },
     {
-      "name": "JSON",
-      "category": "json",
+      "name": "XML",
+      "category": "xml",
       "requires_length": false,
       "requires_precision": false,
       "supports_auto_increment": false

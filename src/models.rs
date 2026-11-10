@@ -186,7 +186,11 @@ pub struct ColumnDefinition {
     pub is_nullable: bool,
     pub is_pk: bool,
     pub is_auto_increment: bool,
+    #[serde(default)]
     pub default_value: Option<String>,
+    /// Column description; only sent when the user entered one.
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
