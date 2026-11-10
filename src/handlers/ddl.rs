@@ -343,10 +343,6 @@ pub fn get_create_foreign_key_sql(
     Ok(vec![sql])
 }
 
-pub fn drop_index_sql(_table: &str, index_name: &str, schema: Option<&str>) -> String {
-    format!("DROP INDEX {}", quote_qualified_name(schema, index_name))
-}
-
 pub fn drop_foreign_key_sql(table: &str, fk_name: &str, schema: Option<&str>) -> String {
     format!(
         "ALTER TABLE {} DROP FOREIGN KEY {}",
@@ -685,11 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_are_quoted() {
-        assert_eq!(
-            drop_index_sql("T", "idx price", Some("APP")),
-            "DROP INDEX \"APP\".\"idx price\""
-        );
+    fn drops_a_foreign_key_with_quoted_names() {
         assert_eq!(
             drop_foreign_key_sql("Order Details", "FK \"x\"", Some("APP")),
             format!("ALTER TABLE {T} DROP FOREIGN KEY \"FK \"\"x\"\"\"")

@@ -274,12 +274,18 @@ pub fn get_foreign_keys(
         .collect())
 }
 
+/// Lists the indexes of a table, one entry per key column in key order.
+///
+/// Columns an index merely carries (`INCLUDE`) are not key columns and are
+/// left out. For an index on an expression (`UPPER(LAST_NAME)`) Db2 stores a
+/// generated column name such as `K00`; the expression is reported instead.
 pub fn get_indexes(session: &Session, schema: &str, table_name: &str) -> PluginResult<Vec<Index>> {
     let sql = format!(
-        "SELECT I.INDNAME, C.COLNAME, I.UNIQUERULE, I.INDEXTYPE, C.COLSEQ \
+        "SELECT I.INDNAME, C.COLNAME, I.UNIQUERULE, C.COLSEQ, C.TEXT \
          FROM SYSCAT.INDEXES I \
          JOIN SYSCAT.INDEXCOLUSE C ON C.INDSCHEMA = I.INDSCHEMA AND C.INDNAME = I.INDNAME \
-         WHERE I.TABSCHEMA = {} AND I.TABNAME = {} ORDER BY I.INDNAME, C.COLSEQ WITH UR",
+         WHERE I.TABSCHEMA = {} AND I.TABNAME = {} AND C.COLORDER <> 'I' \
+         ORDER BY I.INDNAME, I.INDSCHEMA, C.COLSEQ WITH UR",
         string_literal(schema),
         string_literal(table_name)
     );
@@ -287,16 +293,57 @@ pub fn get_indexes(session: &Session, schema: &str, table_name: &str) -> PluginR
     Ok(result
         .rows
         .into_iter()
-        .map(|row| Index {
-            name: cell(&row, 0).unwrap_or_default().to_string(),
-            column_name: cell(&row, 1).unwrap_or_default().to_string(),
-            is_unique: matches!(cell(&row, 2), Some("P" | "U")),
-            is_primary: matches!(cell(&row, 2), Some("P")),
-            seq_in_index: cell(&row, 4)
-                .and_then(|value| value.parse::<i32>().ok())
-                .unwrap_or(0),
+        .map(|row| {
+            let expression = non_empty(cell(&row, 4));
+            Index {
+                name: cell(&row, 0).unwrap_or_default().to_string(),
+                is_expression: expression.is_some(),
+                column_name: expression
+                    .unwrap_or_else(|| cell(&row, 1).unwrap_or_default().to_string()),
+                is_unique: matches!(cell(&row, 2), Some("P" | "U")),
+                is_primary: matches!(cell(&row, 2), Some("P")),
+                seq_in_index: cell_i64(&row, 3).unwrap_or(0) as i32,
+            }
         })
         .collect())
+}
+
+/// Drops an index of a table.
+///
+/// An index is named within its own schema, which need not be the table's:
+/// the schema is looked up, so an index created elsewhere can be dropped
+/// and an index that does not belong to the table is refused instead of
+/// dropping a namesake. The index behind a primary key or unique constraint
+/// cannot be dropped on its own; Db2 says so (SQL0669N).
+pub fn drop_index(
+    session: &Session,
+    schema: &str,
+    table_name: &str,
+    index_name: &str,
+) -> PluginResult<()> {
+    let sql = format!(
+        "SELECT INDSCHEMA FROM SYSCAT.INDEXES \
+         WHERE TABSCHEMA = {} AND TABNAME = {} AND INDNAME = {} \
+         ORDER BY CASE WHEN INDSCHEMA = {} THEN 0 ELSE 1 END WITH UR",
+        string_literal(schema),
+        string_literal(table_name),
+        string_literal(index_name),
+        string_literal(schema)
+    );
+    let result = session.query(&sql)?;
+    let Some(index_schema) = result.rows.first().and_then(|row| cell(row, 0)) else {
+        return Err(format!(
+            "Index {} was not found on table {}",
+            quote_identifier(index_name),
+            quote_qualified_name(Some(schema), table_name)
+        ));
+    };
+    // System schemas are stored padded (`SYSIBM  `).
+    let sql = format!(
+        "DROP INDEX {}",
+        quote_qualified_name(Some(index_schema.trim_end()), index_name)
+    );
+    session.execute(&sql).map(|_| ())
 }
 
 pub fn get_routines(session: &Session, schema: &str) -> PluginResult<Vec<RoutineInfo>> {
