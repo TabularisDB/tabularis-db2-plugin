@@ -6,6 +6,7 @@ use crate::models::{
 use crate::utils::identifiers::{quote_identifier, quote_qualified_name};
 use crate::utils::types::describe_catalog_type;
 use crate::utils::values::string_literal;
+use crate::utils::views::{is_create_view_statement, parse_view_text, view_query};
 use std::collections::HashMap;
 
 fn cell(row: &[Option<String>], index: usize) -> Option<&str> {
@@ -73,6 +74,7 @@ pub fn get_tables(session: &Session, schema: &str) -> PluginResult<Vec<TableInfo
         .collect())
 }
 
+/// Lists the views of a schema with their query.
 pub fn get_views(session: &Session, schema: &str) -> PluginResult<Vec<ViewInfo>> {
     let sql = format!(
         "SELECT VIEWNAME, TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = {} ORDER BY VIEWNAME WITH UR",
@@ -85,17 +87,14 @@ pub fn get_views(session: &Session, schema: &str) -> PluginResult<Vec<ViewInfo>>
         .filter_map(|row| {
             cell(&row, 0).map(|name| ViewInfo {
                 name: name.to_string(),
-                definition: cell(&row, 1).map(ToString::to_string),
+                definition: cell(&row, 1).map(|text| view_query(text).to_string()),
             })
         })
         .collect())
 }
 
-pub fn get_view_definition(
-    session: &Session,
-    schema: &str,
-    view_name: &str,
-) -> PluginResult<String> {
+/// The statement Db2 stored for a view, as it was typed.
+fn view_text(session: &Session, schema: &str, view_name: &str) -> PluginResult<Option<String>> {
     let sql = format!(
         "SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = {} AND VIEWNAME = {} WITH UR",
         string_literal(schema),
@@ -106,8 +105,88 @@ pub fn get_view_definition(
         .rows
         .into_iter()
         .next()
-        .and_then(|row| row.into_iter().next().flatten())
-        .unwrap_or_default())
+        .and_then(|row| row.into_iter().next().flatten()))
+}
+
+/// The query of a view: what follows `AS` in its `CREATE VIEW`. This is the
+/// form Tabularis edits and hands back to `alter_view`.
+pub fn get_view_definition(
+    session: &Session,
+    schema: &str,
+    view_name: &str,
+) -> PluginResult<String> {
+    let target = quote_qualified_name(Some(schema), view_name);
+    let text = view_text(session, schema, view_name)?
+        .ok_or_else(|| format!("View {target} was not found"))?;
+    Ok(view_query(&text).to_string())
+}
+
+/// A definition as Db2 takes it after `AS`: no surrounding blank space and
+/// no statement terminator.
+fn view_body(definition: &str) -> PluginResult<&str> {
+    let body = definition.trim().trim_end_matches(';').trim_end();
+    if body.is_empty() {
+        return Err("A view needs a query".to_string());
+    }
+    Ok(body)
+}
+
+/// Creates a view from its query. A definition that is already a complete
+/// `CREATE VIEW` statement is run as written.
+pub fn create_view(
+    session: &Session,
+    schema: &str,
+    view_name: &str,
+    definition: &str,
+) -> PluginResult<()> {
+    let body = view_body(definition)?;
+    let sql = if is_create_view_statement(body) {
+        body.to_string()
+    } else {
+        format!(
+            "CREATE VIEW {} AS {body}",
+            quote_qualified_name(Some(schema), view_name)
+        )
+    };
+    session.execute(&sql).map(|_| ())
+}
+
+/// Replaces the query of an existing view, keeping its privileges
+/// (`CREATE OR REPLACE VIEW`).
+///
+/// A view declared with an explicit column list (`CREATE VIEW V (A, B) AS
+/// ...`) keeps it: Tabularis only edits the query, and replacing the view
+/// without the list would rename its columns to whatever the query calls
+/// them.
+pub fn alter_view(
+    session: &Session,
+    schema: &str,
+    view_name: &str,
+    definition: &str,
+) -> PluginResult<()> {
+    let body = view_body(definition)?;
+    let target = quote_qualified_name(Some(schema), view_name);
+    let existing = view_text(session, schema, view_name)?
+        .ok_or_else(|| format!("View {target} was not found"))?;
+
+    let sql = if is_create_view_statement(body) {
+        body.to_string()
+    } else {
+        let column_list = parse_view_text(&existing)
+            .and_then(|view| view.column_list)
+            .map(|list| format!(" {list}"))
+            .unwrap_or_default();
+        format!("CREATE OR REPLACE VIEW {target}{column_list} AS {body}")
+    };
+    session.execute(&sql).map(|_| ())
+}
+
+pub fn drop_view(session: &Session, schema: &str, view_name: &str) -> PluginResult<()> {
+    let sql = format!(
+        "DROP VIEW {}",
+        quote_qualified_name(Some(schema), view_name)
+    );
+    session.execute(&sql).map(|_| ())
 }
 
 /// Column list shared by `get_columns` and `get_all_columns_batch`; the

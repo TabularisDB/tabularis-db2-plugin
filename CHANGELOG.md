@@ -160,11 +160,23 @@ All notable changes to this project will be documented in this file.
   - The type list no longer offers `JSON`, which is not a Db2 column type,
     and offers `BOOLEAN`; `SMALLINT`, `INTEGER` and `BIGINT` can be
     auto-increment; `DECFLOAT` no longer asks for a scale.
+- View support, verified against Db2 12.1 and Tabularis 0.32.0 (#7):
+  - `get_view_definition` and `get_views` return the view's query. They
+    returned the whole `CREATE VIEW S.V AS SELECT ...` statement Db2
+    stores, which Tabularis's view editor showed as the query and sent back
+    to be wrapped in a second `CREATE OR REPLACE VIEW`.
+  - A definition longer than 4,096 bytes is returned whole.
+  - `get_view_definition` reports a view that does not exist instead of
+    returning an empty definition.
 - `SQL0668N` with reason code 7 (table in "reorg pending" state) now comes
   with the `REORG TABLE` statement that fixes it.
 
 ### Added
 
+- `create_view`, `alter_view` and `drop_view`. The manifest declares
+  `views`, so Tabularis offers "Create New View", "Edit View" and "Drop
+  View"; all three answered "Method not implemented". `alter_view` keeps
+  the explicit column list of a view that has one.
 - `get_table_ddl`: the `CREATE TABLE` of an existing table rebuilt from the
   catalog (full types, defaults, identity and generated columns, primary
   key and unique constraints, indexes, comments). "Export table to SQL" and

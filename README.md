@@ -68,7 +68,7 @@ This plugin enables Tabularis to connect to Db2 through **ODBC**, browse schemas
 | Update record | Verified | [#4](https://github.com/TabularisDB/tabularis-db2-plugin/issues/4) |
 | Delete record | Verified | [#5](https://github.com/TabularisDB/tabularis-db2-plugin/issues/5) |
 | DDL generation | Verified | [#6](https://github.com/TabularisDB/tabularis-db2-plugin/issues/6) |
-| View support | Not yet verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
+| View support | Verified | [#7](https://github.com/TabularisDB/tabularis-db2-plugin/issues/7) |
 | Index management | Not yet verified | [#8](https://github.com/TabularisDB/tabularis-db2-plugin/issues/8) |
 | Foreign key management | Not yet verified | [#9](https://github.com/TabularisDB/tabularis-db2-plugin/issues/9) |
 | Routine support | Not yet verified | [#10](https://github.com/TabularisDB/tabularis-db2-plugin/issues/10) |
@@ -168,8 +168,9 @@ The code is intentionally split by responsibility:
 | `get_foreign_keys` | Lists foreign keys for a table |
 | `get_indexes` | Lists indexes for a table |
 | `get_views` | Lists views in the selected schema |
-| `get_view_definition` | Returns the stored view definition |
+| `get_view_definition` | Returns the view's query: the stored `CREATE VIEW` text without its header |
 | `get_view_columns` | Returns column metadata for a view |
+| `create_view` / `alter_view` / `drop_view` | Create a view from a query, replace its query (`CREATE OR REPLACE VIEW`, keeping an explicit column list) and drop it |
 | `get_routines` | Lists routines in the selected schema |
 | `get_routine_parameters` | Returns routine parameters |
 | `get_routine_definition` | Returns the stored routine body when available |

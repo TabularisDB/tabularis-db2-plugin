@@ -233,6 +233,24 @@ fn dispatch(method: &str, request: &Request) -> RpcResult {
             reply(metadata::get_columns(&session, &schema, view))
         }
 
+        "create_view" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            let definition = request.required(&["definition"])?;
+            reply(metadata::create_view(&session, &schema, view, definition).map(|()| Value::Null))
+        }
+        "alter_view" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            let definition = request.required(&["definition"])?;
+            reply(metadata::alter_view(&session, &schema, view, definition).map(|()| Value::Null))
+        }
+        "drop_view" => {
+            let (session, schema) = request.schema_session()?;
+            let view = request.required(&["view_name", "view", "name"])?;
+            reply(metadata::drop_view(&session, &schema, view).map(|()| Value::Null))
+        }
+
         // -- Routines --------------------------------------------------------
         "get_routines" => {
             let (session, schema) = request.schema_session()?;
