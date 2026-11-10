@@ -25,6 +25,8 @@ extern "C" {
         indicator: *mut OdbcLen,
     ) -> i16;
     fn SQLRowCount(stmt: OdbcHandle, row_count: *mut OdbcLen) -> i16;
+    fn SQLSetStmtAttr(stmt: OdbcHandle, attribute: i32, value: OdbcHandle, length: i32) -> i16;
+    fn SQLPrepare(stmt: OdbcHandle, text: *const u8, length: i32) -> i16;
     fn SQLColAttribute(
         stmt: OdbcHandle,
         column: u16,
@@ -43,6 +45,9 @@ const SQL_SUCCESS_WITH_INFO: i16 = 1;
 const SQL_NO_DATA: i16 = 100;
 const SQL_NULL_DATA: OdbcLen = -1;
 const SQL_NO_TOTAL: OdbcLen = -4;
+/// Db2 CLI's statement attribute for deferred prepare, and its "off" value.
+const SQL_ATTR_DEFERRED_PREPARE: i32 = 1277;
+const SQL_DEFERRED_PREPARE_OFF: usize = 0;
 
 /// Size of the buffer one `SQLGetData` call fills. Longer values (CLOBs,
 /// view and routine bodies, long comments) are read in several calls.
@@ -378,6 +383,53 @@ impl Session {
             return result.map(Outcome::Rows);
         }
         Ok(Outcome::Affected(affected_rows(&mut statement)))
+    }
+}
+
+impl Session {
+    /// Has Db2 compile a statement without running it, and returns the
+    /// error it reports. CLI defers a prepare until the statement runs,
+    /// answering describe calls on its own, so deferral is turned off for
+    /// this statement.
+    pub fn check(&self, sql: &str) -> PluginResult<()> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        let handle = statement.as_stmt_ref().as_sys().0 as OdbcHandle;
+        let ret = unsafe {
+            SQLSetStmtAttr(
+                handle,
+                SQL_ATTR_DEFERRED_PREPARE,
+                SQL_DEFERRED_PREPARE_OFF as OdbcHandle,
+                0,
+            )
+        };
+        if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
+            return Err(statement_error(&mut statement, "SQLSetStmtAttr", ret));
+        }
+        let ret = unsafe { SQLPrepare(handle, sql.as_ptr(), sql.len() as i32) };
+        if ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO {
+            return Err(statement_error(&mut statement, "SQLPrepare", ret));
+        }
+        Ok(())
+    }
+
+    /// Runs a statement to the end and says how many rows it returned, or
+    /// changed when it returns none. The rows are fetched but their values
+    /// are never read: this is for timing a statement, not for its data.
+    pub fn drain(&self, sql: &str) -> PluginResult<u64> {
+        let mut statement = self.connection.preallocate().map_err(odbc_error)?;
+        if let Some(mut cursor) = statement.execute(sql, ()).map_err(odbc_error)? {
+            let mut count = 0u64;
+            let result = loop {
+                match fetch_next(&mut cursor) {
+                    Ok(true) => count += 1,
+                    Ok(false) => break Ok(count),
+                    Err(error) => break Err(error),
+                }
+            };
+            release_cursor(cursor);
+            return result;
+        }
+        Ok(affected_rows(&mut statement))
     }
 }
 

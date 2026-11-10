@@ -213,11 +213,38 @@ All notable changes to this project will be documented in this file.
   - `get_routine_definition` of a routine Db2 keeps no source for (external
     and built-in routines) says why, instead of opening an empty editor; an
     unknown routine is an error, not an empty definition.
+- `explain_query`, checked against Db2 12.1 and Tabularis 0.32.0:
+  - Each request now reads its own plan, under a `QUERYTAG` of its own. It
+    used to read whichever plan anyone on the database had explained last.
+    Its rows are deleted once read, so the explain tables no longer grow with
+    every click.
+  - Analyze used to set `has_analyze_data` without running anything. It now
+    runs the statement and reports the rows it returned or changed and its
+    elapsed time.
+  - A statement that cannot be explained fails with Db2's error for the
+    statement as written, not one quoting the `EXPLAIN` around it. A
+    statement with no access plan, such as DDL, says so.
 - `SQL0668N` with reason code 7 (table in "reorg pending" state) now comes
   with the `REORG TABLE` statement that fixes it.
 
 ### Added
 
+- Visual EXPLAIN. The manifest declares the `explain` capability, and
+  `explain_query` answers in Tabularis's raw form (`engine: db2`,
+  `format: db2-explain-tables-json`). The answer carries the rows Db2 wrote
+  into its explain tables, and a TypeScript parser shipped with the plugin
+  (`explain/`, declared under `explain_parsers`) turns them into the plan
+  tree, as the SQL Server plugin does with SHOWPLAN XML. Compared with the
+  tree the plugin used to build:
+  - tables and indexes are the `relation` of the operator that reads them,
+    no longer operators of their own named `Unknown` with id `-1`. An index
+    scan names its index and its table.
+  - predicates are placed where Db2 applies them: index ranges in
+    `index_condition`, filters in `filter`, the join of a hash join in
+    `hash_condition`.
+  - joins report their type, and a join's outer input comes first.
+  - operator arguments (sort keys, prefetch, lock intent…) and Db2's compile
+    time are kept.
 - `create_view`, `alter_view` and `drop_view`. The manifest declares
   `views`, so Tabularis offers "Create New View", "Edit View" and "Drop
   View"; all three answered "Method not implemented". `alter_view` keeps
@@ -244,6 +271,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Tabularis 0.30.0 or later is required (it was 0.25.0): the first release
+  that serves a plugin's EXPLAIN parser to Tabularis Web.
+- Release archives include `explain/dist/index.iife.js`; a manual install
+  copies the `explain/` folder along with the binary and `.tabularium`.
 - Each request now uses a single Db2 connection for all of its statements
   (`get_schema_snapshot` opened three).
 - `connect_timeout_secs` from the connection settings is honoured as the

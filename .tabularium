@@ -19,7 +19,7 @@
   "readme": "README.md",
   "homepage": "https://github.com/TabularisDB/tabularis-db2-plugin",
   "documentation_url": "https://github.com/TabularisDB/tabularis-db2-plugin#readme",
-  "min_runtime_version": "0.25.0",
+  "min_runtime_version": "0.30.0",
   "support": {
     "issues_url": "https://github.com/TabularisDB/tabularis-db2-plugin/issues"
   },
@@ -35,6 +35,7 @@
     "schemas": true,
     "views": true,
     "routines": true,
+    "explain": true,
     "file_based": false,
     "folder_based": false,
     "connection_string": true,
@@ -188,6 +189,14 @@
     "manage_tables": true,
     "readonly": false
   },
+  "explain_parsers": [
+    {
+      "engine": "db2",
+      "format": "db2-explain-tables-json",
+      "label": "Db2 explain tables",
+      "module": "explain/dist/index.iife.js"
+    }
+  ],
   "settings": [
     {
       "key": "driver_name",

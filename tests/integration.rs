@@ -4664,75 +4664,91 @@ fn test_drop_foreign_key() {
 // Tests — Explain query
 // ---------------------------------------------------------------------------
 
+fn explain(p: &mut Plugin, query: &str, analyze: bool) -> Value {
+    p.call(
+        "explain_query",
+        p.schema_params(json!({ "query": query, "analyze": analyze })),
+    )
+}
+
+/// The Db2 payload of a successful `explain_query`, after checking the raw
+/// envelope Tabularis hands to the plugin's parser.
+fn explain_payload(p: &mut Plugin, query: &str, analyze: bool) -> Value {
+    let resp = explain(p, query, analyze);
+    let result = &resp["result"];
+    assert_eq!(result["engine"], "db2", "{resp}");
+    assert_eq!(result["format"], "db2-explain-tables-json", "{resp}");
+    assert_eq!(result["original_query"], query);
+    let payload = result["payload"].as_str().expect("payload");
+    assert!(payload.starts_with("{\"db2_explain\":1,"), "{payload}");
+    serde_json::from_str(payload).expect("payload is JSON")
+}
+
+fn operator_types(payload: &Value) -> Vec<String> {
+    payload["operators"]
+        .as_array()
+        .expect("operators")
+        .iter()
+        .map(|operator| operator["type"].as_str().expect("type").to_string())
+        .collect()
+}
+
+/// `(schema, name)` of every table or index streamed into an operator.
+fn objects_read(payload: &Value) -> Vec<(String, String)> {
+    payload["streams"]
+        .as_array()
+        .expect("streams")
+        .iter()
+        .filter(|stream| stream["source_type"] == "D")
+        .map(|stream| {
+            (
+                stream["object_schema"]
+                    .as_str()
+                    .expect("schema")
+                    .to_string(),
+                stream["object_name"].as_str().expect("name").to_string(),
+            )
+        })
+        .collect()
+}
+
+fn explain_rows_left(p: &mut Plugin) -> i64 {
+    let result = p.query_ok(
+        "SELECT COUNT(*) FROM SYSTOOLS.EXPLAIN_STATEMENT WHERE QUERYTAG LIKE 'TABULARIS%'",
+        Value::Null,
+        1,
+    );
+    result["rows"][0][0].as_i64().expect("count")
+}
+
 #[test]
 fn test_explain_query() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "explain_query",
-        p.schema_params(json!({
-            "query": "SELECT * FROM TEST_SCHEMA.EMPLOYEES WHERE DEPT_ID = 1",
-            "analyze": false
-        })),
-    );
+    let payload = explain_payload(&mut p, "SELECT * FROM EMPLOYEES WHERE DEPT_ID = 1;", false);
 
-    assert_eq!(result["driver"], json!("db2"));
-    assert_eq!(result["has_analyze_data"], json!(false));
-    assert!(
-        result["original_query"]
-            .as_str()
-            .unwrap()
-            .contains("EMPLOYEES"),
-        "should preserve original query"
+    assert_eq!(payload["schema"], "TEST_SCHEMA");
+    assert!(payload["analyze"].is_null());
+    assert_eq!(operator_types(&payload), ["RETURN", "TBSCAN"]);
+    let root = &payload["operators"][0];
+    assert_eq!(root["id"], 1);
+    assert!(root["total_cost"].as_f64().expect("cost") > 0.0);
+    assert_eq!(
+        objects_read(&payload),
+        [("TEST_SCHEMA".to_string(), "EMPLOYEES".to_string())]
     );
-
-    // The root node should have a real operator type from the explain tables,
-    // not the old placeholder "DB2 Explain".
-    let root = &result["root"];
-    assert!(
-        !root["id"].as_str().unwrap_or("").is_empty(),
-        "root node should have an id"
+    assert_eq!(
+        payload["predicates"],
+        json!([{ "operator_id": 2, "how_applied": "SARG", "text": "(Q1.DEPT_ID = 1)" }])
     );
     assert!(
-        !root["node_type"].as_str().unwrap_or("").is_empty(),
-        "root node should have an operator type"
-    );
-    assert_ne!(
-        root["node_type"].as_str().unwrap_or(""),
-        "DB2 Explain",
-        "root node should have a real operator type, not the placeholder"
-    );
-
-    // raw_output should contain the readable plan text, not the old placeholder.
-    let raw = result["raw_output"].as_str().unwrap_or("");
-    assert!(
-        !raw.contains("not implemented yet"),
-        "raw_output should contain real plan data"
-    );
-}
-
-#[test]
-fn test_explain_query_analyze() {
-    require_db2!();
-    let mut p = Plugin::spawn();
-
-    let result = p.call_ok(
-        "explain_query",
-        p.schema_params(json!({
-            "query": "SELECT * FROM TEST_SCHEMA.EMPLOYEES WHERE DEPT_ID = 1",
-            "analyze": true
-        })),
-    );
-
-    assert_eq!(result["driver"], json!("db2"));
-    assert_eq!(result["has_analyze_data"], json!(true));
-    assert!(
-        result["original_query"]
-            .as_str()
-            .unwrap()
-            .contains("EMPLOYEES"),
-        "should preserve original query"
+        payload["arguments"]
+            .as_array()
+            .expect("arguments")
+            .iter()
+            .any(|argument| argument["type"] == "PREPTIME"),
+        "Db2 reports the time it took to compile the statement: {payload}"
     );
 }
 
@@ -4741,28 +4757,162 @@ fn test_explain_query_join() {
     require_db2!();
     let mut p = Plugin::spawn();
 
-    let result = p.call_ok(
-        "explain_query",
-        p.schema_params(json!({
-            "query": "SELECT e.FIRST_NAME, d.DEPT_NAME FROM TEST_SCHEMA.EMPLOYEES e JOIN TEST_SCHEMA.DEPARTMENTS d ON e.DEPT_ID = d.DEPT_ID",
-            "analyze": false
-        })),
+    let payload = explain_payload(
+        &mut p,
+        "SELECT E.LAST_NAME, D.DEPT_NAME FROM EMPLOYEES E \
+         LEFT JOIN DEPARTMENTS D ON D.DEPT_ID = E.DEPT_ID \
+         WHERE E.EMP_ID BETWEEN 2 AND 5 AND E.SALARY > 1000 ORDER BY E.LAST_NAME",
+        false,
     );
 
-    assert_eq!(result["driver"], json!("db2"));
+    let types = operator_types(&payload);
+    assert!(types.iter().any(|t| t.ends_with("JOIN")), "{types:?}");
+    assert!(types.contains(&"IXSCAN".to_string()), "{types:?}");
 
-    // A JOIN query should produce a plan tree with children.
-    let root = &result["root"];
-    let raw = result["raw_output"].as_str().unwrap_or("");
-    // The plan should mention multiple operators for a join.
+    // The index the plan reads comes with its table.
+    let indexes = payload["indexes"].as_array().expect("indexes");
+    assert_eq!(indexes.len(), 1, "{payload}");
+    assert_eq!(indexes[0]["table_schema"], "TEST_SCHEMA");
+    assert_eq!(indexes[0]["table_name"], "EMPLOYEES");
+    let objects = objects_read(&payload);
     assert!(
-        root["children"]
-            .as_array()
-            .map(|a| !a.is_empty())
-            .unwrap_or(false)
-            || raw.lines().count() > 1,
-        "a JOIN query should produce a multi-node plan"
+        objects.contains(&(
+            indexes[0]["schema"].as_str().unwrap().to_string(),
+            indexes[0]["name"].as_str().unwrap().to_string()
+        )),
+        "{objects:?}"
     );
+    assert!(objects.contains(&("TEST_SCHEMA".to_string(), "DEPARTMENTS".to_string())));
+
+    let applied: Vec<&str> = payload["predicates"]
+        .as_array()
+        .expect("predicates")
+        .iter()
+        .map(|predicate| predicate["how_applied"].as_str().unwrap())
+        .collect();
+    for how in ["JOIN", "START", "STOP", "SARG"] {
+        assert!(applied.contains(&how), "{how} missing: {applied:?}");
+    }
+    let outer_join = payload["arguments"]
+        .as_array()
+        .expect("arguments")
+        .iter()
+        .find(|argument| argument["type"] == "OUTERJN")
+        .expect("an outer join argument");
+    assert!(["LEFT", "RIGHT"].contains(&outer_join["value"].as_str().unwrap()));
+}
+
+#[test]
+fn test_explain_query_other_schema_and_delimited_names() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let payload = explain_payload(
+        &mut p,
+        "SELECT COUNT(*) FROM \"Mixed Case\".\"Order Details\"",
+        false,
+    );
+    let indexes = payload["indexes"].as_array().expect("indexes");
+    assert_eq!(indexes[0]["table_schema"], "Mixed Case", "{payload}");
+    assert_eq!(indexes[0]["table_name"], "Order Details", "{payload}");
+}
+
+#[test]
+fn test_explain_query_data_change_is_not_run() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let payload = explain_payload(&mut p, "DELETE FROM PAGING_TEST WHERE N <= 10", false);
+    assert_eq!(operator_types(&payload)[..2], ["RETURN", "DELETE"]);
+
+    let count = p.query_ok(
+        "SELECT COUNT(*) FROM PAGING_TEST WHERE N <= 10",
+        Value::Null,
+        1,
+    );
+    assert_eq!(
+        count["rows"][0][0], 10,
+        "EXPLAIN only compiles the statement"
+    );
+}
+
+#[test]
+fn test_explain_query_analyze() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let payload = explain_payload(&mut p, "SELECT * FROM PAGING_TEST WHERE N > 100", true);
+    // The statement ran: the payload carries what really came back.
+    assert_eq!(payload["analyze"]["rows"], 1100, "{payload}");
+    assert!(payload["analyze"]["elapsed_ms"].as_f64().expect("time") > 0.0);
+}
+
+#[test]
+fn test_explain_query_analyze_reports_runtime_errors() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // The plan is fine; running the statement is not.
+    let resp = explain(&mut p, "SELECT 1 / (EMP_ID - EMP_ID) FROM EMPLOYEES", true);
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .expect("an error")
+            .starts_with("SQL0801N"),
+        "{resp}"
+    );
+}
+
+#[test]
+fn test_explain_query_errors_name_the_statement() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    // Db2's message is about the statement as written, not about the
+    // EXPLAIN wrapped around it.
+    let resp = explain(&mut p, "SELEC 1", false);
+    let message = resp["error"]["message"].as_str().expect("an error");
+    assert!(message.starts_with("SQL0104N"), "{message}");
+    assert!(message.contains("BEGIN-OF-STATEMENT"), "{message}");
+    assert!(!message.contains("QUERYTAG"), "{message}");
+    assert!(!message.contains("TABULARIS"), "{message}");
+
+    let resp = explain(&mut p, "SELECT * FROM NO_SUCH_TABLE", false);
+    assert_eq!(
+        resp["error"]["message"],
+        "SQL0204N \"TEST_SCHEMA.NO_SUCH_TABLE\" is an undefined name. SQLSTATE=42704"
+    );
+
+    let resp = explain(&mut p, "CREATE TABLE NOT_EXPLAINED (A INTEGER)", false);
+    assert_eq!(
+        resp["error"]["message"],
+        "Db2 has no access plan for this statement: only queries and data \
+         changes (SELECT, VALUES, INSERT, UPDATE, DELETE, MERGE) can be explained"
+    );
+    let tables = p.call_ok("get_tables", p.schema_params(json!({})));
+    assert!(
+        !tables.to_string().contains("NOT_EXPLAINED"),
+        "the statement was only compiled"
+    );
+
+    let resp = explain(&mut p, " ; ", false);
+    assert_eq!(resp["error"]["message"], "The query is empty");
+}
+
+#[test]
+fn test_explain_query_leaves_no_rows_behind() {
+    require_db2!();
+    let mut p = Plugin::spawn();
+
+    let before = explain_rows_left(&mut p);
+    for query in [
+        "SELECT * FROM EMPLOYEES",
+        "SELECT DEPT_ID, COUNT(*) FROM EMPLOYEES GROUP BY DEPT_ID",
+        "SELEC 1",
+    ] {
+        explain(&mut p, query, false);
+    }
+    assert_eq!(explain_rows_left(&mut p), before);
 }
 
 // ---------------------------------------------------------------------------

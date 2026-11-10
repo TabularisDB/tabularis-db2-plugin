@@ -1,0 +1,521 @@
+{
+  "db2_explain": 1,
+  "schema": "TEST_SCHEMA",
+  "operators": [
+    {
+      "id": 1,
+      "type": "RETURN",
+      "total_cost": 13.5484580993652,
+      "io_cost": 2.0,
+      "cpu_cost": 195377.609375,
+      "first_row_cost": 13.5483160018921,
+      "re_total_cost": 6.77777338027954,
+      "buffers": 0.0
+    },
+    {
+      "id": 2,
+      "type": "TBSCAN",
+      "total_cost": 13.5484580993652,
+      "io_cost": 2.0,
+      "cpu_cost": 195377.609375,
+      "first_row_cost": 13.5483160018921,
+      "re_total_cost": 6.77777338027954,
+      "buffers": 0.0
+    },
+    {
+      "id": 3,
+      "type": "SORT",
+      "total_cost": 13.548171043396,
+      "io_cost": 2.0,
+      "cpu_cost": 192340.609375,
+      "first_row_cost": 13.548171043396,
+      "re_total_cost": 6.7774863243103,
+      "buffers": 2.0
+    },
+    {
+      "id": 4,
+      "type": "UNION",
+      "total_cost": 13.5468034744263,
+      "io_cost": 2.0,
+      "cpu_cost": 177866.65625,
+      "first_row_cost": 6.76994180679321,
+      "re_total_cost": 6.77702379226685,
+      "buffers": 2.0
+    },
+    {
+      "id": 5,
+      "type": "TBSCAN",
+      "total_cost": 6.77059316635132,
+      "io_cost": 1.0,
+      "cpu_cost": 59203.0,
+      "first_row_cost": 6.76994180679321,
+      "re_total_cost": 0.000813376915175468,
+      "buffers": 1.0
+    },
+    {
+      "id": 6,
+      "type": "HSJOIN",
+      "total_cost": 6.77591609954834,
+      "io_cost": 1.0,
+      "cpu_cost": 115548.65625,
+      "first_row_cost": 6.77591609954834,
+      "re_total_cost": 6.77591609954834,
+      "buffers": 1.0
+    },
+    {
+      "id": 7,
+      "type": "TBSCAN",
+      "total_cost": 6.77091836929321,
+      "io_cost": 1.0,
+      "cpu_cost": 62647.0,
+      "first_row_cost": 6.76994180679321,
+      "re_total_cost": 0.00113872776273638,
+      "buffers": 1.0
+    },
+    {
+      "id": 8,
+      "type": "IXSCAN",
+      "total_cost": 0.00475027225911617,
+      "io_cost": 0.0,
+      "cpu_cost": 50284.0,
+      "first_row_cost": 0.00377478706650436,
+      "re_total_cost": 0.00140031205955893,
+      "buffers": 1.0
+    }
+  ],
+  "streams": [
+    {
+      "source_type": "O",
+      "source_id": 2,
+      "target_id": 1,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 3,
+      "target_id": 2,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 4,
+      "target_id": 3,
+      "object_schema": null,
+      "object_name": null,
+      "count": 10.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 5,
+      "target_id": 4,
+      "object_schema": null,
+      "object_name": null,
+      "count": 4.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 6,
+      "target_id": 4,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 5,
+      "object_schema": "TEST_SCHEMA",
+      "object_name": "DEPARTMENTS",
+      "count": 4.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 7,
+      "target_id": 6,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "O",
+      "source_id": 8,
+      "target_id": 6,
+      "object_schema": null,
+      "object_name": null,
+      "count": 6.0
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 7,
+      "object_schema": "TEST_SCHEMA",
+      "object_name": "EMPLOYEES",
+      "count": 6.0
+    },
+    {
+      "source_type": "D",
+      "source_id": -1,
+      "target_id": 8,
+      "object_schema": "SYSIBM",
+      "object_name": "SQL261110050755130",
+      "count": 6.0
+    }
+  ],
+  "predicates": [
+    {
+      "operator_id": 6,
+      "how_applied": "JOIN",
+      "text": "(Q3.EMP_ID = Q4.EMP_ID)"
+    }
+  ],
+  "arguments": [
+    {
+      "operator_id": 1,
+      "type": "BLDLEVEL",
+      "value": "DB2 v12.1.5.0 : special_85816"
+    },
+    {
+      "operator_id": 1,
+      "type": "CPUCACHE",
+      "value": "1048576"
+    },
+    {
+      "operator_id": 1,
+      "type": "HEAPUSE",
+      "value": "112 Pages"
+    },
+    {
+      "operator_id": 1,
+      "type": "PLANID",
+      "value": "903c81a06df676ab"
+    },
+    {
+      "operator_id": 1,
+      "type": "PREPTIME",
+      "value": "47 milliseconds"
+    },
+    {
+      "operator_id": 1,
+      "type": "SEMEVID",
+      "value": "494d25221635e5f4"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTHEAP",
+      "value": "8192"
+    },
+    {
+      "operator_id": 1,
+      "type": "STMTID",
+      "value": "d9db05088765fae9"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTID",
+      "value": "0"
+    },
+    {
+      "operator_id": 1,
+      "type": "TENANTNM",
+      "value": "SYSTEM"
+    },
+    {
+      "operator_id": 2,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 2,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 2,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 2,
+      "type": "SPEED",
+      "value": "SLOW"
+    },
+    {
+      "operator_id": 2,
+      "type": "THROTTLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 2,
+      "type": "VISIBLE",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 2,
+      "type": "WRAPPING",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 3,
+      "type": "DUPLWARN",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 3,
+      "type": "KEYS",
+      "value": "6"
+    },
+    {
+      "operator_id": 3,
+      "type": "NUMROWS",
+      "value": "10"
+    },
+    {
+      "operator_id": 3,
+      "type": "ROWWIDTH",
+      "value": "76.000000"
+    },
+    {
+      "operator_id": 3,
+      "type": "SORTKEY",
+      "value": "1: Q7.LAST_NAME(A)"
+    },
+    {
+      "operator_id": 3,
+      "type": "TEMPSIZE",
+      "value": "4096"
+    },
+    {
+      "operator_id": 3,
+      "type": "UNIQUE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "CUR_COMM",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "LCKAVOID",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 5,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 5,
+      "type": "ROWLOCK",
+      "value": "SHARE (CS/RS)"
+    },
+    {
+      "operator_id": 5,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 5,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "SPEED",
+      "value": "FAST"
+    },
+    {
+      "operator_id": 5,
+      "type": "TABLOCK",
+      "value": "INTENT SHARE"
+    },
+    {
+      "operator_id": 5,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    },
+    {
+      "operator_id": 5,
+      "type": "THROTTLE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "VISIBLE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 5,
+      "type": "WRAPPING",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 6,
+      "type": "BITFLTR",
+      "value": "FALSE"
+    },
+    {
+      "operator_id": 6,
+      "type": "EARLYOUT",
+      "value": "LEFT"
+    },
+    {
+      "operator_id": 6,
+      "type": "HASHCODE",
+      "value": "24 BIT"
+    },
+    {
+      "operator_id": 6,
+      "type": "HASHTBSZ",
+      "value": "4"
+    },
+    {
+      "operator_id": 6,
+      "type": "TEMPSIZE",
+      "value": "4096"
+    },
+    {
+      "operator_id": 6,
+      "type": "TUPBLKSZ",
+      "value": "4000"
+    },
+    {
+      "operator_id": 7,
+      "type": "CUR_COMM",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 7,
+      "type": "JN INPUT",
+      "value": "OUTER"
+    },
+    {
+      "operator_id": 7,
+      "type": "LCKAVOID",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 7,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 7,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 7,
+      "type": "ROWLOCK",
+      "value": "SHARE (CS/RS)"
+    },
+    {
+      "operator_id": 7,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 7,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 7,
+      "type": "SPEED",
+      "value": "FAST"
+    },
+    {
+      "operator_id": 7,
+      "type": "TABLOCK",
+      "value": "INTENT SHARE"
+    },
+    {
+      "operator_id": 7,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    },
+    {
+      "operator_id": 7,
+      "type": "THROTTLE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 7,
+      "type": "VISIBLE",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 7,
+      "type": "WRAPPING",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 8,
+      "type": "CUR_COMM",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 8,
+      "type": "JN INPUT",
+      "value": "INNER"
+    },
+    {
+      "operator_id": 8,
+      "type": "LCKAVOID",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 8,
+      "type": "MAXPAGES",
+      "value": "ALL"
+    },
+    {
+      "operator_id": 8,
+      "type": "PREFETCH",
+      "value": "NONE"
+    },
+    {
+      "operator_id": 8,
+      "type": "ROWLOCK",
+      "value": "SHARE (CS/RS)"
+    },
+    {
+      "operator_id": 8,
+      "type": "SCANDIR",
+      "value": "FORWARD"
+    },
+    {
+      "operator_id": 8,
+      "type": "SKIP_INS",
+      "value": "TRUE"
+    },
+    {
+      "operator_id": 8,
+      "type": "TABLOCK",
+      "value": "INTENT SHARE"
+    },
+    {
+      "operator_id": 8,
+      "type": "TBISOLVL",
+      "value": "CURSOR STABILITY"
+    }
+  ],
+  "indexes": [
+    {
+      "schema": "SYSIBM",
+      "name": "SQL261110050755130",
+      "table_schema": "TEST_SCHEMA",
+      "table_name": "EMP_PROJECTS"
+    }
+  ],
+  "analyze": null
+}
