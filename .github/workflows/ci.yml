@@ -162,9 +162,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y unixodbc-dev
+          # public.dhe.ibm.com now answers 403 for this tarball. IBM ships the
+          # same clidriver from its ibmdb/db2drivers repository (the source
+          # the ibm_db drivers download from), pinned here to a commit and
+          # checked against its SHA-256.
           curl -fSL --retry 3 \
-            https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz \
+            https://github.com/ibmdb/db2drivers/raw/357e6081de0b2f794f18b5490e6cab6b1b84340a/clidriver/v12.1.4/linuxx64_odbc_cli.tar.gz \
             -o /tmp/clidriver.tar.gz
+          echo "77b754d19be2cd5c55f6feb8bd951c2b17aa6646289944855612c5a2ac555f55  /tmp/clidriver.tar.gz" | sha256sum -c -
           sudo mkdir -p /opt/ibm
           sudo tar xf /tmp/clidriver.tar.gz -C /opt/ibm
           printf '[Db2]\nDescription = IBM Db2 ODBC Driver\nDriver = /opt/ibm/clidriver/lib/libdb2.so\n' \
