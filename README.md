@@ -250,7 +250,7 @@ A `docker-compose.yml` is provided to spin up a local IBM Db2 Community Edition 
 **Installing the IBM clidriver on Linux:**
 
 ```bash
-curl -fSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz \
+curl -fSL https://github.com/ibmdb/db2drivers/raw/main/clidriver/v12.1.4/linuxx64_odbc_cli.tar.gz \
   -o /tmp/clidriver.tar.gz
 sudo mkdir -p /opt/ibm
 sudo tar xf /tmp/clidriver.tar.gz -C /opt/ibm
