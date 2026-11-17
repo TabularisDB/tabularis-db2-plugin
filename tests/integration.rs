@@ -4769,18 +4769,32 @@ fn test_explain_query_join() {
     assert!(types.iter().any(|t| t.ends_with("JOIN")), "{types:?}");
     assert!(types.contains(&"IXSCAN".to_string()), "{types:?}");
 
-    // The index the plan reads comes with its table.
+    // Every index the plan reads comes with its table. The EMP_ID range is
+    // read through the EMPLOYEES primary key; whether the join also probes
+    // the DEPARTMENTS primary key, or scans that table, is up to the
+    // optimizer and changes with the statistics Db2 has collected.
     let indexes = payload["indexes"].as_array().expect("indexes");
-    assert_eq!(indexes.len(), 1, "{payload}");
-    assert_eq!(indexes[0]["table_schema"], "TEST_SCHEMA");
-    assert_eq!(indexes[0]["table_name"], "EMPLOYEES");
     let objects = objects_read(&payload);
+    assert!((1..=2).contains(&indexes.len()), "{payload}");
+    for index in indexes {
+        assert_eq!(index["table_schema"], "TEST_SCHEMA", "{payload}");
+        assert!(
+            ["EMPLOYEES", "DEPARTMENTS"].contains(&index["table_name"].as_str().unwrap()),
+            "{payload}"
+        );
+        assert!(
+            objects.contains(&(
+                index["schema"].as_str().unwrap().to_string(),
+                index["name"].as_str().unwrap().to_string()
+            )),
+            "{objects:?}"
+        );
+    }
     assert!(
-        objects.contains(&(
-            indexes[0]["schema"].as_str().unwrap().to_string(),
-            indexes[0]["name"].as_str().unwrap().to_string()
-        )),
-        "{objects:?}"
+        indexes
+            .iter()
+            .any(|index| index["table_name"] == "EMPLOYEES"),
+        "{payload}"
     );
     assert!(objects.contains(&("TEST_SCHEMA".to_string(), "DEPARTMENTS".to_string())));
 
