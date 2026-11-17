@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-17
+
+### Security
+
+- `rustix` 1.1.4 → 1.1.6 for
+  [RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486.html):
+  its xattr functions marked unwritten bytes as initialized when given a
+  zero-length buffer. rustix comes in through `odbc-api`'s default `prompt`
+  feature and the plugin never calls those functions (#40, fixes #38).
+
+### Dependencies
+
+- `odbc-api` 29.3.0 → 30.1.0 (#39). Its breaking changes touch shared
+  connections and statement parents, which the plugin does not use; the
+  live Db2 suite passes.
+
 ## [0.1.1] - 2026-11-10
 
 ### Added
